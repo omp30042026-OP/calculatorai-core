@@ -1,0 +1,554 @@
+SNAPS keys: [
+  'baseline',
+  'simulated',
+  'skipped_changes',
+  'applied_changes',
+  'overridden_changes'
+]
+SNAPSHOT item_ids: [ 'sku_1', 'sku_2' ]
+[
+  {
+    "item_id": "sku_1",
+    "inputs": [
+      {
+        "metric": "UNIT_PRICE",
+        "value": 10,
+        "obs_id": "o_1",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      },
+      {
+        "metric": "UNIT_COST",
+        "value": 5,
+        "obs_id": "o_4",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      },
+      {
+        "metric": "VOLUME",
+        "value": 1000,
+        "obs_id": "o_3",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      }
+    ],
+    "changes": [
+      {
+        "change_id": "c_1",
+        "type": "PRICE_CHANGE",
+        "target": "ITEM:sku_1",
+        "delta": {
+          "kind": "RELATIVE",
+          "multiplier": 1.05
+        },
+        "status": "OVERRIDDEN",
+        "note": "Overridden by ABSOLUTE change c_out",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c_2",
+        "type": "COST_CHANGE",
+        "target": "ITEM:sku_1",
+        "delta": {
+          "kind": "ADD",
+          "amount": 0.5
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c_3",
+        "type": "VOLUME_CHANGE",
+        "target": "ITEM:sku_1",
+        "delta": {
+          "kind": "RELATIVE",
+          "multiplier": 0.9
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c_out",
+        "type": "PRICE_CHANGE",
+        "target": "ITEM:sku_1",
+        "delta": {
+          "kind": "ABSOLUTE",
+          "new_value": 20
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 0.7096773109607643,
+            "overlap": {
+              "start": "2026-01-10T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      }
+    ],
+    "computations": [
+      {
+        "name": "baseline_total_margin",
+        "formula": "(price - cost) * volume",
+        "substituted": "(10 - 5) * 1000",
+        "value": 5000
+      },
+      {
+        "name": "simulated_total_margin",
+        "formula": "(price - cost) * volume",
+        "substituted": "(17.24 - 5.50) * 900",
+        "value": 10567.741008714534
+      },
+      {
+        "name": "delta_total_margin",
+        "formula": "simulated_total_margin - baseline_total_margin",
+        "substituted": "10567.74 - 5000",
+        "value": 5567.7410087145345
+      },
+      {
+        "name": "cost_effect",
+        "formula": "-(sc - bc) * bv",
+        "substituted": "-(5.50 - 5) * 1000",
+        "value": -500
+      },
+      {
+        "name": "cost_elasticity",
+        "formula": "cost_effect / baseline_total_margin",
+        "substituted": "-500 / 5000",
+        "value": -0.1
+      },
+      {
+        "name": "cost_sensitivity_1pct",
+        "formula": "-0.01 * sc * sv",
+        "substituted": "-0.01 * 5.50 * 900",
+        "value": -49.5
+      },
+      {
+        "name": "expected_unit_price",
+        "formula": "bp*(1-active_fraction) + abs_price*(active_fraction)",
+        "substituted": "10*(1-0.71) + 20*(0.71)",
+        "value": 17.096773109607643
+      },
+      {
+        "name": "interaction_effect",
+        "formula": "delta - (price_effect + cost_effect + volume_effect)",
+        "substituted": "5567.74 - (7241.93 + -500 + -500)",
+        "value": -674.1934454127259
+      },
+      {
+        "name": "price_effect",
+        "formula": "(sp - bp) * bv",
+        "substituted": "(17.24 - 10) * 1000",
+        "value": 7241.93445412726
+      },
+      {
+        "name": "price_elasticity",
+        "formula": "price_effect / baseline_total_margin",
+        "substituted": "7241.93 / 5000",
+        "value": 1.448386890825452
+      },
+      {
+        "name": "price_sensitivity_1pct",
+        "formula": "0.01 * sp * sv",
+        "substituted": "0.01 * 17.24 * 900",
+        "value": 155.17741008714535
+      },
+      {
+        "name": "primary_margin_driver",
+        "formula": "argmax(|price|, |cost|, |volume|)",
+        "substituted": "price",
+        "value": null
+      },
+      {
+        "name": "recommendation",
+        "formula": "interpret(primary_margin_driver)",
+        "substituted": "Pricing is the dominant margin lever",
+        "value": null
+      },
+      {
+        "name": "volume_effect",
+        "formula": "(sv - bv) * (bp - bc)",
+        "substituted": "(900 - 1000) * (10 - 5)",
+        "value": -500
+      },
+      {
+        "name": "volume_elasticity",
+        "formula": "volume_effect / baseline_total_margin",
+        "substituted": "-500 / 5000",
+        "value": -0.1
+      },
+      {
+        "name": "volume_sensitivity_1pct",
+        "formula": "0.01 * sv * (sp - sc)",
+        "substituted": "0.01 * 900 * (17.24 - 5.50)",
+        "value": 105.67741008714535
+      },
+      {
+        "name": "baseline_total_spend_estimate",
+        "formula": "Σ(unit_cost_vendor * assumed_volume_vendor)",
+        "substituted": "8875",
+        "value": 8875
+      },
+      {
+        "name": "top_vendor_spend_share_of_item",
+        "formula": "top_vendor_spend / item_total_spend",
+        "substituted": "0.5454545454545454",
+        "value": 0.5454545454545454
+      },
+      {
+        "name": "baseline_top_vendor_share",
+        "formula": "top_vendor_spend / item_total_spend (baseline)",
+        "substituted": "0.5454545454545454",
+        "value": 0.5454545454545454
+      },
+      {
+        "name": "simulated_top_vendor_share",
+        "formula": "top_vendor_spend / item_total_spend (simulated)",
+        "substituted": "0.5416666666666666",
+        "value": 0.5416666666666666
+      },
+      {
+        "name": "delta_top_vendor_share",
+        "formula": "simulated_top_vendor_share - baseline_top_vendor_share",
+        "substituted": "-0.0037878787878787845",
+        "value": -0.0037878787878787845
+      }
+    ],
+    "result": {
+      "baseline_total_margin": 5000,
+      "simulated_total_margin": 10567.741008714534,
+      "delta_total_margin": 5567.7410087145345
+    },
+    "notes": [
+      "NOTE: UNIT_PRICE is 23 days old",
+      "NOTE: UNIT_COST is 23 days old",
+      "NOTE: VOLUME is 23 days old",
+      "RISK(v0): concentration computed from baseline UNIT_COST * VOLUME.",
+      "ASSUMPTION: VOLUME has no vendor split; assumed equal split across 2 vendors for item sku_1.",
+      "WARN: Top vendor concentration for item sku_1 is 54.5% (v_1 / Vendor A).",
+      "NOTE: Concentration change is small (-0.38 percentage points)."
+    ]
+  },
+  {
+    "item_id": "sku_2",
+    "inputs": [
+      {
+        "metric": "UNIT_PRICE",
+        "value": 12,
+        "obs_id": "o_5",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      },
+      {
+        "metric": "UNIT_COST",
+        "value": 6.5,
+        "obs_id": "o_7",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      },
+      {
+        "metric": "VOLUME",
+        "value": 500,
+        "obs_id": "o_8",
+        "quality": {
+          "staleness_days": 23,
+          "completeness": 1,
+          "source_system": "pos"
+        }
+      }
+    ],
+    "changes": [
+      {
+        "change_id": "c2_1",
+        "type": "PRICE_CHANGE",
+        "target": "ITEM:sku_2",
+        "delta": {
+          "kind": "RELATIVE",
+          "multiplier": 1.1
+        },
+        "status": "OVERRIDDEN",
+        "note": "Overridden by ABSOLUTE change c2_out",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c2_2",
+        "type": "COST_CHANGE",
+        "target": "ITEM:sku_2",
+        "delta": {
+          "kind": "ADD",
+          "amount": 0.25
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c2_3",
+        "type": "VOLUME_CHANGE",
+        "target": "ITEM:sku_2",
+        "delta": {
+          "kind": "RELATIVE",
+          "multiplier": 1.2
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 1,
+            "overlap": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      },
+      {
+        "change_id": "c2_out",
+        "type": "PRICE_CHANGE",
+        "target": "ITEM:sku_2",
+        "delta": {
+          "kind": "ABSOLUTE",
+          "new_value": 18
+        },
+        "status": "APPLIED",
+        "meta": {
+          "time_gating": {
+            "active_fraction": 0.5483869281611888,
+            "overlap": {
+              "start": "2026-01-15T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            },
+            "horizon": {
+              "start": "2026-01-01T00:00:00.000Z",
+              "end": "2026-01-31T23:59:59.000Z"
+            }
+          }
+        }
+      }
+    ],
+    "computations": [
+      {
+        "name": "baseline_total_margin",
+        "formula": "(price - cost) * volume",
+        "substituted": "(12 - 6.50) * 500",
+        "value": 2750
+      },
+      {
+        "name": "simulated_total_margin",
+        "formula": "(price - cost) * volume",
+        "substituted": "(15.83 - 6.75) * 600",
+        "value": 5449.354353104224
+      },
+      {
+        "name": "delta_total_margin",
+        "formula": "simulated_total_margin - baseline_total_margin",
+        "substituted": "5449.35 - 2750",
+        "value": 2699.354353104224
+      },
+      {
+        "name": "cost_effect",
+        "formula": "-(sc - bc) * bv",
+        "substituted": "-(6.75 - 6.50) * 500",
+        "value": -125
+      },
+      {
+        "name": "cost_elasticity",
+        "formula": "cost_effect / baseline_total_margin",
+        "substituted": "-125 / 2750",
+        "value": -0.045454545454545456
+      },
+      {
+        "name": "cost_sensitivity_1pct",
+        "formula": "-0.01 * sc * sv",
+        "substituted": "-0.01 * 6.75 * 600",
+        "value": -40.5
+      },
+      {
+        "name": "expected_unit_price",
+        "formula": "bp*(1-active_fraction) + abs_price*(active_fraction)",
+        "substituted": "12*(1-0.55) + 18*(0.55)",
+        "value": 15.290321568967133
+      },
+      {
+        "name": "interaction_effect",
+        "formula": "delta - (price_effect + cost_effect + volume_effect)",
+        "substituted": "2699.35 - (1916.13 + -125 + 550)",
+        "value": 358.22572551737085
+      },
+      {
+        "name": "price_effect",
+        "formula": "(sp - bp) * bv",
+        "substituted": "(15.83 - 12) * 500",
+        "value": 1916.128627586853
+      },
+      {
+        "name": "price_elasticity",
+        "formula": "price_effect / baseline_total_margin",
+        "substituted": "1916.13 / 2750",
+        "value": 0.6967740463952193
+      },
+      {
+        "name": "price_sensitivity_1pct",
+        "formula": "0.01 * sp * sv",
+        "substituted": "0.01 * 15.83 * 600",
+        "value": 94.99354353104223
+      },
+      {
+        "name": "primary_margin_driver",
+        "formula": "argmax(|price|, |cost|, |volume|)",
+        "substituted": "price",
+        "value": null
+      },
+      {
+        "name": "recommendation",
+        "formula": "interpret(primary_margin_driver)",
+        "substituted": "Pricing is the dominant margin lever",
+        "value": null
+      },
+      {
+        "name": "volume_effect",
+        "formula": "(sv - bv) * (bp - bc)",
+        "substituted": "(600 - 500) * (12 - 6.50)",
+        "value": 550
+      },
+      {
+        "name": "volume_elasticity",
+        "formula": "volume_effect / baseline_total_margin",
+        "substituted": "550 / 2750",
+        "value": 0.2
+      },
+      {
+        "name": "volume_sensitivity_1pct",
+        "formula": "0.01 * sv * (sp - sc)",
+        "substituted": "0.01 * 600 * (15.83 - 6.75)",
+        "value": 54.493543531042235
+      },
+      {
+        "name": "baseline_total_spend_estimate",
+        "formula": "Σ(unit_cost_vendor * assumed_volume_vendor)",
+        "substituted": "8875",
+        "value": 8875
+      },
+      {
+        "name": "top_vendor_spend_share_of_item",
+        "formula": "top_vendor_spend / item_total_spend",
+        "substituted": "0.5185185185185185",
+        "value": 0.5185185185185185
+      },
+      {
+        "name": "baseline_top_vendor_share",
+        "formula": "top_vendor_spend / item_total_spend (baseline)",
+        "substituted": "0.5185185185185185",
+        "value": 0.5185185185185185
+      },
+      {
+        "name": "simulated_top_vendor_share",
+        "formula": "top_vendor_spend / item_total_spend (simulated)",
+        "substituted": "0.5178571428571429",
+        "value": 0.5178571428571429
+      },
+      {
+        "name": "delta_top_vendor_share",
+        "formula": "simulated_top_vendor_share - baseline_top_vendor_share",
+        "substituted": "-0.000661375661375585",
+        "value": -0.000661375661375585
+      }
+    ],
+    "result": {
+      "baseline_total_margin": 2750,
+      "simulated_total_margin": 5449.354353104224,
+      "delta_total_margin": 2699.354353104224
+    },
+    "notes": [
+      "NOTE: UNIT_PRICE is 23 days old",
+      "NOTE: UNIT_COST is 23 days old",
+      "NOTE: VOLUME is 23 days old",
+      "RISK(v0): concentration computed from baseline UNIT_COST * VOLUME.",
+      "ASSUMPTION: VOLUME has no vendor split; assumed equal split across 2 vendors for item sku_2.",
+      "WARN: Top vendor concentration for item sku_2 is 51.9% (v_1 / Vendor A).",
+      "NOTE: Concentration change is small (-0.07 percentage points)."
+    ]
+  }
+]

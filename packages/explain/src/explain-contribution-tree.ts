@@ -270,11 +270,13 @@ function buildExpectedUnitPriceRow(t: ExplainTree, c: any): Computation {
 }
 
 /**
- * v7.1: Robust active_fraction extraction (structured meta)
+ * v7.3: Robust active_fraction extraction
  * Priority:
  *  1) APPLIED ABSOLUTE PRICE_CHANGE meta.time_gating.active_fraction
  *  2) ANY ABSOLUTE PRICE_CHANGE meta.time_gating.active_fraction
  *  3) ANY change meta.time_gating.active_fraction
+ * Fallback:
+ *  4) derive from overlap/horizon windows (end-start)/(end-start)
  * Accepts 0 as valid.
  */
 function getActiveFractionSmart(t: ExplainTree): number | null {
@@ -290,6 +292,25 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
     return typeof v === "number" && Number.isFinite(v) ? v : null;
   };
 
+  const deriveFromWindows = (ch: any): number | null => {
+    const tg = ch?.meta?.time_gating ?? ch?.meta?.timeGating;
+    const overlap = tg?.overlap;
+    const horizon = tg?.horizon;
+    const o0 = Date.parse(overlap?.start);
+    const o1 = Date.parse(overlap?.end);
+    const h0 = Date.parse(horizon?.start);
+    const h1 = Date.parse(horizon?.end);
+
+    if (![o0, o1, h0, h1].every((x) => Number.isFinite(x))) return null;
+    const overlapMs = Math.max(0, o1 - o0);
+    const horizonMs = Math.max(0, h1 - h0);
+    if (horizonMs <= 0) return null;
+
+    const af = overlapMs / horizonMs;
+    // clamp just in case of boundary/timezone quirks
+    return Math.max(0, Math.min(1, af));
+  };
+
   // 1) Prefer APPLIED ABSOLUTE price change
   for (const ch of changes) {
     if (
@@ -297,7 +318,7 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
       ch?.delta?.kind === "ABSOLUTE" &&
       ch?.status === "APPLIED"
     ) {
-      const af = readMetaAf(ch);
+      const af = readMetaAf(ch) ?? deriveFromWindows(ch);
       if (af != null) return af;
     }
   }
@@ -305,19 +326,21 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
   // 2) Any ABSOLUTE price change
   for (const ch of changes) {
     if (ch?.type === "PRICE_CHANGE" && ch?.delta?.kind === "ABSOLUTE") {
-      const af = readMetaAf(ch);
+      const af = readMetaAf(ch) ?? deriveFromWindows(ch);
       if (af != null) return af;
     }
   }
 
   // 3) Any change
   for (const ch of changes) {
-    const af = readMetaAf(ch);
+    const af = readMetaAf(ch) ?? deriveFromWindows(ch);
     if (af != null) return af;
   }
 
   return null;
 }
+
+
 
 function getAbsolutePriceFromChanges(t: ExplainTree): number | null {
   const abs = (t.changes as any[])
