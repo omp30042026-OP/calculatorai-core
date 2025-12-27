@@ -1,62 +1,119 @@
+// packages/decision/src/store-engine.ts
 import { createDecisionV2 } from "./decision.js";
-import { replayDecision } from "./engine.js";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
 import type { DecisionEngineOptions } from "./engine.js";
+import { replayDecision } from "./engine.js";
 import type { PolicyViolation } from "./policy.js";
-import type { DecisionStore, DecisionEventRecord } from "./store.js";
+import type { DecisionStore } from "./store.js";
 
 export type StoreApplyResult =
   | { ok: true; decision: Decision; warnings: PolicyViolation[] }
   | { ok: false; decision: Decision; violations: PolicyViolation[] };
 
+function nowIso(opts: DecisionEngineOptions): string {
+  return (opts.now ?? (() => new Date().toISOString()))();
+}
+
+/**
+ * Store-backed apply:
+ * V3 additions:
+ * - optional optimistic locking via expected_current_version
+ * - optional idempotency via idempotency_key (store may dedupe)
+ * - optional atomic txn via store.runInTransaction
+ */
 export async function applyEventWithStore(
   store: DecisionStore,
   input: {
     decision_id: string;
     event: DecisionEvent;
     metaIfCreate?: Record<string, unknown>;
+
+    // V3: safe retries (client-supplied)
+    idempotency_key?: string;
+
+    // V3: optimistic locking
+    expected_current_version?: number;
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
-  const now = opts.now ?? (() => new Date().toISOString());
+  const run = store.runInTransaction
+    ? store.runInTransaction.bind(store)
+    : async <T>(fn: () => Promise<T>) => fn();
 
-  // 1) Load root (version=1) or create it
-  let root = await store.getRootDecision(input.decision_id);
+  return run(async () => {
+    // 0) optimistic lock (best-effort; store may implement helper)
+    if (typeof input.expected_current_version === "number") {
+      const curVer =
+        (await store.getCurrentVersion?.(input.decision_id)) ??
+        (await store.getDecision(input.decision_id))?.version ??
+        null;
 
-  if (!root) {
-    root = createDecisionV2(
-      {
-        decision_id: input.decision_id,
-        meta: input.metaIfCreate ?? {},
-        version: 1
-      },
-      now
-    );
+      if (curVer !== input.expected_current_version) {
+        const d =
+          (await store.getDecision(input.decision_id)) ??
+          createDecisionV2(
+            { decision_id: input.decision_id, meta: input.metaIfCreate ?? {} },
+            opts.now
+          );
 
-    await store.createDecision(root);
-    await store.putDecision(root);
-  }
+        return {
+          ok: false,
+          decision: d,
+          violations: [
+            {
+              code: "CONCURRENT_MODIFICATION",
+              severity: "BLOCK",
+              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
+            },
+          ],
+        };
+      }
+    }
 
-  // 2) Append event record
-  const rec: Omit<DecisionEventRecord, "decision_id" | "seq"> = {
-    at: now(),
-    event: input.event
-  };
+    // 1) ensure root exists
+    let root = await store.getRootDecision(input.decision_id);
+    if (!root) {
+      root = createDecisionV2(
+        { decision_id: input.decision_id, meta: input.metaIfCreate ?? {} },
+        opts.now
+      );
+      await store.createDecision(root);
+      await store.putDecision(root); // set as current too
+    }
 
-  await store.appendEvent(input.decision_id, rec);
+    // 2) idempotency shortcut if store supports lookup
+    if (input.idempotency_key && store.findEventByIdempotencyKey) {
+      const existing = await store.findEventByIdempotencyKey(
+        input.decision_id,
+        input.idempotency_key
+      );
+      if (existing) {
+        const events = (await store.listEvents(input.decision_id)).map((r) => r.event);
+        const rr = replayDecision(root, events, opts);
+        if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+        await store.putDecision(rr.decision);
+        return { ok: true, decision: rr.decision, warnings: rr.warnings };
+      }
+    }
 
-  // 3) Replay all stored events deterministically
-  const rows = await store.listEvents(input.decision_id);
-  const events = rows.map((r) => r.event);
+    // 3) append event
+    await store.appendEvent(input.decision_id, {
+      at: nowIso(opts),
+      event: input.event,
+      idempotency_key: input.idempotency_key,
+    });
 
-  const rr = replayDecision(root, events, opts);
+    // 4) replay -> materialize current
+    const events = (await store.listEvents(input.decision_id)).map((r) => r.event);
+    const rr = replayDecision(root, events, opts);
 
-  if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+    if (!rr.ok) {
+      return { ok: false, decision: rr.decision, violations: rr.violations };
+    }
 
-  // 4) Persist “current”
-  await store.putDecision(rr.decision);
-
-  return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    await store.putDecision(rr.decision);
+    return { ok: true, decision: rr.decision, warnings: rr.warnings };
+  });
 }
 
