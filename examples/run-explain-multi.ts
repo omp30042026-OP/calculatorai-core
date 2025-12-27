@@ -1,5 +1,4 @@
-import { readFileSync, existsSync, readdirSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync } from "node:fs";
 
 import { attachContributionToTrees } from "../packages/explain/src/explain-contribution-tree";
 import { computeMarginImpactFromSnapshots } from "../packages/compute/src/margins";
@@ -13,41 +12,6 @@ function writeJsonOnly(obj: unknown) {
   process.stdout.write(JSON.stringify(obj, null, 2) + "\n");
 }
 
-function pickDecisionPath(): string {
-  const arg = process.argv[2];
-  if (arg) return arg;
-
-  const preferred = [
-    "examples/decisions/single-item.json",
-    "examples/decisions/single.json",
-    "examples/decisions/decision.json",
-    "examples/decisions/tree.json",
-    "examples/decisions/multi-item.json",
-    "examples/decisions/multi.json",
-  ];
-  const hit = preferred.find((p) => existsSync(p));
-  if (hit) return hit;
-
-  const dir = "examples/decisions";
-  if (!existsSync(dir)) {
-    throw new Error(
-      `Missing directory: ${dir}\nRun like: npx tsx examples/run-explain-tree.ts <path-to-decision.json>`
-    );
-  }
-
-  const candidates = readdirSync(dir)
-    .filter((f) => f.endsWith(".json"))
-    .map((f) => join(dir, f))
-    .sort((a, b) => a.localeCompare(b));
-
-  if (candidates.length === 0) {
-    throw new Error(
-      `No decision JSON found in ${dir}\nRun like: npx tsx examples/run-explain-tree.ts <path-to-decision.json>`
-    );
-  }
-  return candidates[0]!;
-}
-
 function num(x: any): number | null {
   return typeof x === "number" && Number.isFinite(x) ? x : null;
 }
@@ -58,11 +22,7 @@ function fmt(n: number | null): string {
   return isInt ? String(Math.round(n)) : n.toFixed(2);
 }
 
-function enrichTreesWithSnapshotAndTotals(
-  baseTrees: any[],
-  snaps: any,
-  contribRows: any[]
-) {
+function enrichTreesWithSnapshotAndTotals(baseTrees: any[], snaps: any, contribRows: any[]) {
   const byItem = new Map<string, any>();
   for (const r of contribRows ?? []) {
     if (r?.item_id) byItem.set(String(r.item_id), r);
@@ -75,9 +35,7 @@ function enrichTreesWithSnapshotAndTotals(
     const baselineRows = Array.isArray(snaps?.baseline) ? snaps.baseline : [];
     const inputs = baselineRows
       .filter((r: any) => String(r?.item_id) === itemId)
-      .filter((r: any) =>
-        ["UNIT_PRICE", "UNIT_COST", "VOLUME"].includes(String(r?.metric))
-      )
+      .filter((r: any) => ["UNIT_PRICE", "UNIT_COST", "VOLUME"].includes(String(r?.metric)))
       .map((r: any) => ({
         metric: r.metric,
         value: r.value,
@@ -146,9 +104,7 @@ function enrichTreesWithSnapshotAndTotals(
     const result = {
       ...(t?.result ?? {}),
       ...(baselineTotal != null ? { baseline_total_margin: baselineTotal } : {}),
-      ...(simulatedTotal != null
-        ? { simulated_total_margin: simulatedTotal }
-        : {}),
+      ...(simulatedTotal != null ? { simulated_total_margin: simulatedTotal } : {}),
       ...(deltaTotal != null ? { delta_total_margin: deltaTotal } : {}),
     };
 
@@ -156,18 +112,14 @@ function enrichTreesWithSnapshotAndTotals(
   });
 }
 
-const decisionPath = pickDecisionPath();
+const decisionPath = process.argv[2] ?? "examples/decisions/multi-item.json";
 const decision = loadJson(decisionPath);
 
 const snaps = buildDecisionSnapshots(decision);
 const contribRows = computeMarginImpactFromSnapshots(snaps);
 
 const itemIds = Array.from(
-  new Set(
-    [...(snaps?.baseline ?? []), ...(snaps?.simulated ?? [])].map(
-      (r: any) => r.item_id
-    )
-  )
+  new Set([...(snaps?.baseline ?? []), ...(snaps?.simulated ?? [])].map((r: any) => r.item_id))
 ).sort();
 
 const baseTrees = itemIds.map((item_id: string) => ({
@@ -183,4 +135,3 @@ const enrichedBase = enrichTreesWithSnapshotAndTotals(baseTrees, snaps, contribR
 const out = attachContributionToTrees(enrichedBase as any, contribRows as any);
 
 writeJsonOnly(out);
-

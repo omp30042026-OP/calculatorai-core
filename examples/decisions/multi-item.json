@@ -1,0 +1,165 @@
+{
+  "decision_id": "dec_001_multi",
+  "title": "Multi-item price/cost/volume changes",
+  "decision_time": "2025-12-24T00:00:00Z",
+  "horizon": {
+    "start": "2026-01-01T00:00:00Z",
+    "end": "2026-01-31T23:59:59Z"
+  },
+  "currency": "usd",
+  "baseline": {
+    "entities": [
+      { "entity_id": "v_1", "entity_type": "VENDOR", "name": "Vendor A" },
+      { "entity_id": "v_2", "entity_type": "VENDOR", "name": "Vendor B" }
+    ],
+    "items": [
+      { "item_id": "sku_1", "item_type": "SKU", "name": "Item 1", "uom": "each" },
+      { "item_id": "sku_2", "item_type": "SKU", "name": "Item 2", "uom": "each" }
+    ],
+    "relationships": [
+      { "relationship_id": "r_1", "entity_id": "v_1", "item_id": "sku_1", "relationship_type": "SUPPLIES" },
+      { "relationship_id": "r_2", "entity_id": "v_2", "item_id": "sku_1", "relationship_type": "SUPPLIES" },
+
+      { "relationship_id": "r_3", "entity_id": "v_1", "item_id": "sku_2", "relationship_type": "SUPPLIES" },
+      { "relationship_id": "r_4", "entity_id": "v_2", "item_id": "sku_2", "relationship_type": "SUPPLIES" }
+    ],
+    "observations": [
+      {
+        "obs_id": "o_1",
+        "metric": "UNIT_PRICE",
+        "value": 10,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_1", "entity_id": "v_1" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_2",
+        "metric": "UNIT_COST",
+        "value": 6,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_1", "entity_id": "v_1" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_4",
+        "metric": "UNIT_COST",
+        "value": 5,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_1", "entity_id": "v_2" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_3",
+        "metric": "VOLUME",
+        "value": 1000,
+        "unit": "each",
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_1" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+
+      {
+        "obs_id": "o_5",
+        "metric": "UNIT_PRICE",
+        "value": 12,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_2", "entity_id": "v_1" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_6",
+        "metric": "UNIT_COST",
+        "value": 7,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_2", "entity_id": "v_1" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_7",
+        "metric": "UNIT_COST",
+        "value": 6.5,
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_2", "entity_id": "v_2" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      },
+      {
+        "obs_id": "o_8",
+        "metric": "VOLUME",
+        "value": 500,
+        "unit": "each",
+        "time": "2025-12-01T00:00:00Z",
+        "dims": { "item_id": "sku_2" },
+        "quality": { "completeness": 1, "staleness_days": 23, "source_system": "pos" }
+      }
+    ]
+  },
+  "change_set": [
+    {
+      "change_id": "c_1",
+      "type": "PRICE_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_1" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "RELATIVE", "multiplier": 1.05 }
+    },
+    {
+      "change_id": "c_2",
+      "type": "COST_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_1" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "ADD", "amount": 0.5 }
+    },
+    {
+      "change_id": "c_3",
+      "type": "VOLUME_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_1" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "RELATIVE", "multiplier": 0.9 }
+    },
+    {
+      "change_id": "c_out",
+      "type": "PRICE_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_1" },
+      "effective": { "start": "2026-01-10T00:00:00Z" },
+      "delta": { "kind": "ABSOLUTE", "new_value": 20 }
+    },
+
+    {
+      "change_id": "c2_1",
+      "type": "PRICE_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_2" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "RELATIVE", "multiplier": 1.1 }
+    },
+    {
+      "change_id": "c2_2",
+      "type": "COST_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_2" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "ADD", "amount": 0.25 }
+    },
+    {
+      "change_id": "c2_3",
+      "type": "VOLUME_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_2" },
+      "effective": { "start": "2026-01-01T00:00:00Z" },
+      "delta": { "kind": "RELATIVE", "multiplier": 1.2 }
+    },
+    {
+      "change_id": "c2_out",
+      "type": "PRICE_CHANGE",
+      "target": { "scope": "ITEM", "item_id": "sku_2" },
+      "effective": { "start": "2026-01-15T00:00:00Z" },
+      "delta": { "kind": "ABSOLUTE", "new_value": 18 }
+    }
+  ],
+  "assumptions": [],
+  "policy": {
+    "read_only": true,
+    "require_human_review": true,
+    "audit_level": "FULL"
+  },
+  "provenance": {
+    "created_by": "HUMAN",
+    "created_at": "2025-12-24T00:00:00Z"
+  }
+}

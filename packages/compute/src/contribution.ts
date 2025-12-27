@@ -1,63 +1,88 @@
-import type { DecisionSnapshots, ItemSnapshot } from "../../simulate/src/snapshot.js";
+import type { DecisionSnapshots } from "../../simulate/src/snapshot.js";
 
 export type ContributionRow = {
   item_id: string;
 
-  // expose the underlying inputs so explain can build substituted strings consistently
+  // ---------- expanded (new/compat for other tooling) ----------
+  baseline_unit_price: number | null;
+  baseline_unit_cost: number | null;
+  baseline_volume: number | null;
+  baseline_margin_per_unit: number | null;
+
+  simulated_unit_price: number | null;
+  simulated_unit_cost: number | null;
+  simulated_volume: number | null;
+  simulated_margin_per_unit: number | null;
+  // ------------------------------------------------------------
+
+  // baseline (short aliases used by explain layer + assert-effects)
   bp: number | null;
   bc: number | null;
   bv: number | null;
+  baseline_total_margin: number | null;
 
+  // simulated (short aliases used by explain layer + assert-effects)
   sp: number | null;
   sc: number | null;
   sv: number | null;
-
-  baseline_total_margin: number | null;
   simulated_total_margin: number | null;
-  delta_total_margin: number | null;
 
+  // effects
   price_effect: number | null;
   cost_effect: number | null;
   volume_effect: number | null;
   interaction_effect: number | null;
+
+  delta_total_margin: number | null;
+
+  // optional debugging surface (safe for old consumers)
+  notes?: string[];
 };
 
-/**
- * Contribution decomposition (v5):
- * - Uses snapshots as the source of truth.
- * - If time-gating produces horizon-weighted expected metric values in `simulated`,
- *   this function decomposes *that expected outcome*.
- *
- * Formula (classic 3-factor with interaction):
- *  baseline = (bp - bc) * bv
- *  simulated = (sp - sc) * sv
- *  delta = simulated - baseline
- *
- *  price_effect  = (sp - bp) * bv
- *  cost_effect   = -(sc - bc) * bv
- *  volume_effect = (sv - bv) * (bp - bc)
- *  interaction   = delta - (price_effect + cost_effect + volume_effect)
- */
 export function computeContributionFromSnapshots(s: DecisionSnapshots): ContributionRow[] {
-  const baseIndex = new Map<string, ItemSnapshot>();
-  for (const b of s.baseline) baseIndex.set(b.item_id, b);
+  const baselineByItem = new Map(s.baseline.map((r) => [r.item_id, r]));
+  const simByItem = new Map(s.simulated.map((r) => [r.item_id, r]));
 
-  const out: ContributionRow[] = [];
+  const itemIds = [...new Set([...baselineByItem.keys(), ...simByItem.keys()])].sort((a, b) =>
+    a.localeCompare(b)
+  );
 
-  // deterministic order
-  const simSorted = [...s.simulated].sort((a, b) => a.item_id.localeCompare(b.item_id));
+  const rows: ContributionRow[] = [];
 
-  for (const sim of simSorted) {
-    const base = baseIndex.get(sim.item_id);
-    if (!base) continue;
+  for (const item_id of itemIds) {
+    const b = baselineByItem.get(item_id);
+    const sim = simByItem.get(item_id);
 
-    const bp = numOrNull(base.metrics.unit_price.value);
-    const bc = numOrNull(base.metrics.unit_cost.value);
-    const bv = numOrNull(base.metrics.volume.value);
+    const notes: string[] = [];
 
-    const sp = numOrNull(sim.metrics.unit_price.value);
-    const sc = numOrNull(sim.metrics.unit_cost.value);
-    const sv = numOrNull(sim.metrics.volume.value);
+    const baseline_unit_price = numOrNull(b?.metrics?.unit_price?.value);
+    const baseline_unit_cost = numOrNull(b?.metrics?.unit_cost?.value);
+    const baseline_volume = numOrNull(b?.metrics?.volume?.value);
+
+    // Use simulated if present; fallback to baseline (matches your earlier intent)
+    const simulated_unit_price = numOrNull(sim?.metrics?.unit_price?.value ?? baseline_unit_price);
+    const simulated_unit_cost = numOrNull(sim?.metrics?.unit_cost?.value ?? baseline_unit_cost);
+    const simulated_volume = numOrNull(sim?.metrics?.volume?.value ?? baseline_volume);
+
+    // Margin per unit
+    const baseline_margin_per_unit =
+      baseline_unit_price != null && baseline_unit_cost != null
+        ? baseline_unit_price - baseline_unit_cost
+        : null;
+
+    const simulated_margin_per_unit =
+      simulated_unit_price != null && simulated_unit_cost != null
+        ? simulated_unit_price - simulated_unit_cost
+        : null;
+
+    // Short alias fields expected by explain layer + assert-effects
+    const bp = baseline_unit_price;
+    const bc = baseline_unit_cost;
+    const bv = baseline_volume;
+
+    const sp = simulated_unit_price;
+    const sc = simulated_unit_cost;
+    const sv = simulated_volume;
 
     const baseline_total_margin =
       bp != null && bc != null && bv != null ? (bp - bc) * bv : null;
@@ -70,6 +95,7 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
         ? simulated_total_margin - baseline_total_margin
         : null;
 
+    // 3-way decomposition (standard)
     const price_effect = sp != null && bp != null && bv != null ? (sp - bp) * bv : null;
 
     const cost_effect = sc != null && bc != null && bv != null ? -(sc - bc) * bv : null;
@@ -85,28 +111,48 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
         ? delta_total_margin - (price_effect + cost_effect + volume_effect)
         : null;
 
-    out.push({
-      item_id: sim.item_id,
+    // Helpful notes if something is missing
+    if (bp == null) notes.push("missing baseline_unit_price");
+    if (bc == null) notes.push("missing baseline_unit_cost");
+    if (bv == null) notes.push("missing baseline_volume");
 
+    rows.push({
+      item_id,
+
+      // expanded
+      baseline_unit_price,
+      baseline_unit_cost,
+      baseline_volume,
+      baseline_margin_per_unit,
+
+      simulated_unit_price,
+      simulated_unit_cost,
+      simulated_volume,
+      simulated_margin_per_unit,
+
+      // aliases
       bp,
       bc,
       bv,
+      baseline_total_margin,
       sp,
       sc,
       sv,
-
-      baseline_total_margin,
       simulated_total_margin,
-      delta_total_margin,
 
+      // totals + effects
+      delta_total_margin,
       price_effect,
       cost_effect,
       volume_effect,
       interaction_effect,
+
+      // optional
+      notes: notes.length ? notes : undefined,
     });
   }
 
-  return out;
+  return rows;
 }
 
 function numOrNull(x: unknown): number | null {
