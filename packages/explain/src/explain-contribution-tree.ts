@@ -3,13 +3,65 @@ import type { ContributionRow } from "../../compute/src/contribution.js";
 
 type Computation = ExplainTree["computations"][number];
 
+function isExplainTreeArray(x: unknown): x is ExplainTree[] {
+  return Array.isArray(x);
+}
+
+function asContributionRows(x: unknown): ContributionRow[] {
+  return Array.isArray(x) ? (x as ContributionRow[]) : [];
+}
+
+function getTreesFromTreesLike(treesLike: any): ExplainTree[] {
+  // Most common: already a list of explain trees
+  if (Array.isArray(treesLike)) return treesLike as ExplainTree[];
+
+  // If caller passed a whole decision object, trees usually live at decision.trees
+  if (Array.isArray(treesLike?.trees)) return treesLike.trees as ExplainTree[];
+
+  // Some shapes: decision.explain.trees
+  if (Array.isArray(treesLike?.explain?.trees)) return treesLike.explain.trees as ExplainTree[];
+
+  // If none found, return empty list (never throw)
+  return [];
+}
+
+function setTreesBack(treesLike: any, nextTrees: ExplainTree[]): any {
+  // If caller originally passed an array, return the array
+  if (Array.isArray(treesLike)) return nextTrees;
+
+  // If caller passed object with .trees, mutate it and return object
+  if (treesLike && typeof treesLike === "object") {
+    if (Array.isArray(treesLike.trees)) {
+      treesLike.trees = nextTrees;
+      return treesLike;
+    }
+    if (Array.isArray(treesLike?.explain?.trees)) {
+      treesLike.explain.trees = nextTrees;
+      return treesLike;
+    }
+
+    // If there was no tree container, add one (optional but handy)
+    treesLike.trees = nextTrees;
+    return treesLike;
+  }
+
+  // fallback
+  return nextTrees;
+}
+
 export function attachContributionToTrees(
-  trees: ExplainTree[],
-  contribRows: ContributionRow[]
-): ExplainTree[] {
+  treesLike: any,
+  contribRowsLike: any
+): any {
+  const trees = getTreesFromTreesLike(treesLike);
+  const contribRows = asContributionRows(contribRowsLike);
+
+  // If no trees found, do not throw. Just return original input.
+  if (!trees.length) return treesLike;
+
   const byItem = new Map(contribRows.map((r) => [r.item_id, r]));
 
-  return trees.map((t) => {
+  const nextTrees = trees.map((t) => {
     const c: any = byItem.get(t.item_id);
     if (!c) return t;
 
@@ -232,12 +284,13 @@ export function attachContributionToTrees(
     const merged = upsertComputations(patched, extra);
     return { ...t, computations: merged };
   });
+
+  return setTreesBack(treesLike, nextTrees);
 }
 
 /* ---------------------------- v7: expected price ---------------------------- */
 
 function buildExpectedUnitPriceRow(t: ExplainTree, c: any): Computation {
-  // bp: prefer contrib row if present, otherwise read from tree baseline inputs
   const bpFromInputs =
     t.inputs.find((x) => x.metric === "UNIT_PRICE")?.value ?? null;
 
@@ -269,16 +322,6 @@ function buildExpectedUnitPriceRow(t: ExplainTree, c: any): Computation {
   };
 }
 
-/**
- * v7.3: Robust active_fraction extraction
- * Priority:
- *  1) APPLIED ABSOLUTE PRICE_CHANGE meta.time_gating.active_fraction
- *  2) ANY ABSOLUTE PRICE_CHANGE meta.time_gating.active_fraction
- *  3) ANY change meta.time_gating.active_fraction
- * Fallback:
- *  4) derive from overlap/horizon windows (end-start)/(end-start)
- * Accepts 0 as valid.
- */
 function getActiveFractionSmart(t: ExplainTree): number | null {
   const changes = t.changes as any[];
 
@@ -307,11 +350,9 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
     if (horizonMs <= 0) return null;
 
     const af = overlapMs / horizonMs;
-    // clamp just in case of boundary/timezone quirks
     return Math.max(0, Math.min(1, af));
   };
 
-  // 1) Prefer APPLIED ABSOLUTE price change
   for (const ch of changes) {
     if (
       ch?.type === "PRICE_CHANGE" &&
@@ -323,7 +364,6 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
     }
   }
 
-  // 2) Any ABSOLUTE price change
   for (const ch of changes) {
     if (ch?.type === "PRICE_CHANGE" && ch?.delta?.kind === "ABSOLUTE") {
       const af = readMetaAf(ch) ?? deriveFromWindows(ch);
@@ -331,7 +371,6 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
     }
   }
 
-  // 3) Any change
   for (const ch of changes) {
     const af = readMetaAf(ch) ?? deriveFromWindows(ch);
     if (af != null) return af;
@@ -339,8 +378,6 @@ function getActiveFractionSmart(t: ExplainTree): number | null {
 
   return null;
 }
-
-
 
 function getAbsolutePriceFromChanges(t: ExplainTree): number | null {
   const abs = (t.changes as any[])
@@ -357,7 +394,6 @@ function getAbsolutePriceFromChanges(t: ExplainTree): number | null {
   const applied = abs.filter((ch) => ch?.status === "APPLIED");
   const pick = applied.length ? applied : abs;
 
-  // deterministic: last by change_id
   const sorted = [...pick].sort((a, b) =>
     String(a.change_id).localeCompare(String(b.change_id))
   );
@@ -396,3 +432,4 @@ function numOrNull(x: unknown): number | null {
 function absOrNull(x: unknown): number | null {
   return typeof x === "number" && Number.isFinite(x) ? Math.abs(x) : null;
 }
+
