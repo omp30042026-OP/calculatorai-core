@@ -21,6 +21,10 @@ function nowIso(opts: DecisionEngineOptions): string {
  * - optional optimistic locking via expected_current_version
  * - optional idempotency via idempotency_key (store may dedupe)
  * - optional atomic txn via store.runInTransaction
+ *
+ * Snapshot additions (read-path only):
+ * - if store.getLatestSnapshot exists, replay starts from that snapshot
+ * - if store.listEventsAfter exists, only reads events after snapshot seq
  */
 export async function applyEventWithStore(
   store: DecisionStore,
@@ -82,6 +86,30 @@ export async function applyEventWithStore(
       await store.putDecision(root); // set as current too
     }
 
+    // helper: choose replay base (snapshot if available, else root)
+    const snap = store.getLatestSnapshot
+      ? await store.getLatestSnapshot(input.decision_id)
+      : null;
+
+    const baseDecision = snap?.decision ?? root;
+    const baseSeq = snap?.seq ?? 0;
+
+    async function loadEventsAfterSeq(afterSeq: number) {
+      if (store.listEventsAfter) return store.listEventsAfter(input.decision_id, afterSeq);
+      const all = await store.listEvents(input.decision_id);
+      return all.filter((r) => r.seq > afterSeq);
+    }
+
+    async function replayFromBase(): Promise<StoreApplyResult> {
+      const recs = await loadEventsAfterSeq(baseSeq);
+      const events = recs.map((r) => r.event);
+      const rr = replayDecision(baseDecision, events, opts);
+
+      if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+      await store.putDecision(rr.decision);
+      return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    }
+
     // 2) idempotency shortcut if store supports lookup
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
@@ -89,11 +117,8 @@ export async function applyEventWithStore(
         input.idempotency_key
       );
       if (existing) {
-        const events = (await store.listEvents(input.decision_id)).map((r) => r.event);
-        const rr = replayDecision(root, events, opts);
-        if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
-        await store.putDecision(rr.decision);
-        return { ok: true, decision: rr.decision, warnings: rr.warnings };
+        // Event already appended previously → just materialize from base (snapshot/root)
+        return replayFromBase();
       }
     }
 
@@ -104,16 +129,8 @@ export async function applyEventWithStore(
       idempotency_key: input.idempotency_key,
     });
 
-    // 4) replay -> materialize current
-    const events = (await store.listEvents(input.decision_id)).map((r) => r.event);
-    const rr = replayDecision(root, events, opts);
-
-    if (!rr.ok) {
-      return { ok: false, decision: rr.decision, violations: rr.violations };
-    }
-
-    await store.putDecision(rr.decision);
-    return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    // 4) replay -> materialize current (from snapshot/root)
+    return replayFromBase();
   });
 }
 

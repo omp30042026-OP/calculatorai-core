@@ -2,7 +2,12 @@
 import Database from "better-sqlite3";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
-import type { AppendEventInput, DecisionEventRecord, DecisionStore } from "./store.js";
+import type {
+  AppendEventInput,
+  DecisionEventRecord,
+  DecisionSnapshotRecord,
+  DecisionStore,
+} from "./store.js";
 
 export class SqliteDecisionStore implements DecisionStore {
   private db: Database.Database;
@@ -13,15 +18,22 @@ export class SqliteDecisionStore implements DecisionStore {
     this.migrate();
   }
 
-  // ---- V3: atomic transaction hook ----
+  // ✅ IMPORTANT: better-sqlite3 transaction() cannot span async/await correctly.
+  // We implement an explicit BEGIN/COMMIT wrapper that safely surrounds awaited work.
   async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    const tx = this.db.transaction(() => {
-      // we can't await inside better-sqlite3 tx directly,
-      // so we require fn() to be sync-ish. We'll still support Promise
-      // by executing and returning the result.
-      return fn();
-    });
-    return tx();
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const res = await fn();
+      this.db.exec("COMMIT;");
+      return res;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK;");
+      } catch {
+        // ignore rollback errors
+      }
+      throw e;
+    }
   }
 
   private columnExists(table: string, col: string): boolean {
@@ -58,6 +70,18 @@ export class SqliteDecisionStore implements DecisionStore {
 
       CREATE INDEX IF NOT EXISTS idx_events_decision
         ON decision_events(decision_id, seq);
+
+      -- ✅ Snapshots table (optional, but enables fast replay)
+      CREATE TABLE IF NOT EXISTS decision_snapshots (
+        decision_id   TEXT NOT NULL,
+        seq           INTEGER NOT NULL,
+        at            TEXT NOT NULL,
+        decision_json TEXT NOT NULL,
+        PRIMARY KEY (decision_id, seq)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_snapshots_latest
+        ON decision_snapshots(decision_id, seq DESC);
     `);
 
     // V3: idempotency uniqueness
@@ -144,6 +168,43 @@ export class SqliteDecisionStore implements DecisionStore {
     return row ? row.version : null;
   }
 
+  // ✅ Snapshot support
+  async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshotRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, decision_json
+         FROM decision_snapshots
+         WHERE decision_id = ?
+         ORDER BY seq DESC
+         LIMIT 1`
+      )
+      .get(decision_id) as
+      | { decision_id: string; seq: number; at: string; decision_json: string }
+      | undefined;
+
+    if (!row) return null;
+
+    return {
+      decision_id: row.decision_id,
+      seq: row.seq,
+      at: row.at,
+      decision: JSON.parse(row.decision_json) as Decision,
+    };
+  }
+
+  async saveSnapshot(snap: DecisionSnapshotRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO decision_snapshots(decision_id, seq, at, decision_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(decision_id, seq)
+         DO UPDATE SET
+           at = excluded.at,
+           decision_json = excluded.decision_json`
+      )
+      .run(snap.decision_id, snap.seq, snap.at, JSON.stringify(snap.decision));
+  }
+
   async findEventByIdempotencyKey(
     decision_id: string,
     key: string
@@ -216,6 +277,32 @@ export class SqliteDecisionStore implements DecisionStore {
          ORDER BY seq ASC`
       )
       .all(decision_id) as Array<{
+      decision_id: string;
+      seq: number;
+      at: string;
+      event_json: string;
+      idempotency_key: string | null;
+    }>;
+
+    return rows.map((r) => ({
+      decision_id: r.decision_id,
+      seq: r.seq,
+      at: r.at,
+      event: JSON.parse(r.event_json) as DecisionEvent,
+      ...(r.idempotency_key ? { idempotency_key: r.idempotency_key } : {}),
+    }));
+  }
+
+  // ✅ Faster replay path (used by store-engine if present)
+  async listEventsAfter(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, event_json, idempotency_key
+         FROM decision_events
+         WHERE decision_id = ? AND seq > ?
+         ORDER BY seq ASC`
+      )
+      .all(decision_id, after_seq) as Array<{
       decision_id: string;
       seq: number;
       at: string;

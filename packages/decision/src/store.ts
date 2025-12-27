@@ -19,6 +19,17 @@ export type DecisionEventRecord = {
  */
 export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
 
+/**
+ * Optional snapshot row (materialized state at a given seq).
+ * Used to speed up replay for long event streams.
+ */
+export type DecisionSnapshotRecord = {
+  decision_id: string;
+  seq: number; // snapshot is valid after applying events up to this seq
+  at: string; // ISO timestamp
+  decision: Decision;
+};
+
 export type DecisionStore = {
   // decisions
   createDecision(decision: Decision): Promise<void>;
@@ -29,6 +40,18 @@ export type DecisionStore = {
   // events (append-only)
   appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord>;
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
+
+  /**
+   * Optional helper to fetch only events after a seq.
+   * If not provided, store-engine will fall back to listEvents() + filter.
+   */
+  listEventsAfter?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
+
+  /**
+   * Optional snapshot helpers
+   */
+  getLatestSnapshot?(decision_id: string): Promise<DecisionSnapshotRecord | null>;
+  saveSnapshot?(snap: DecisionSnapshotRecord): Promise<void>;
 
   /**
    * Optional helpers for stronger guarantees in store-engine.
