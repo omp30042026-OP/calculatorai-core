@@ -1,23 +1,26 @@
 {
   "name": "calculatorai-core",
   "version": "1.0.0",
-  "description": "",
+  "description": "Core decision, risk, and explainability engine",
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
+    "test": "echo \"No tests specified\"",
 
     "typecheck": "tsc --noEmit",
+
     "explain:single": "tsx examples/run-explain-tree.ts > /dev/null",
     "explain:multi": "tsx examples/run-explain-multi.ts > /dev/null",
+
     "effects": "tsx examples/assert-effects.ts",
     "golden": "tsx examples/verify-golden.ts",
 
     "decision:ok": "tsx examples/run-decision-engine.ts > /dev/null",
     "decision:blocked": "tsx examples/run-decision-engine-blocked.ts > /dev/null",
     "decision:required": "tsx examples/run-decision-engine-required-fields.ts > /dev/null",
+    "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
 
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required"
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts"
   },
   "keywords": [],
   "author": "",
