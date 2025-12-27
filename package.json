@@ -3,13 +3,21 @@
   "version": "1.0.0",
   "description": "",
   "main": "index.js",
+  "type": "commonjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+
+    "typecheck": "tsc --noEmit",
+    "explain:single": "tsx examples/run-explain-tree.ts > /dev/null",
+    "explain:multi": "tsx examples/run-explain-multi.ts > /dev/null",
+    "effects": "tsx examples/assert-effects.ts",
+    "golden": "tsx examples/verify-golden.ts",
+
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
-  "type": "commonjs",
   "devDependencies": {
     "@types/node": "^25.0.3",
     "ts-node": "^10.9.2",
@@ -18,3 +26,4 @@
     "zod": "^4.2.1"
   }
 }
+
