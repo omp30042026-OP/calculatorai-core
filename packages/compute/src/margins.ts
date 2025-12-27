@@ -1,4 +1,4 @@
-import type { DecisionSnapshots, ItemSnapshot } from "../../simulate/src/snapshot.js";
+import type { DecisionSnapshots } from "../../simulate/src/snapshot.js";
 
 export type MarginImpactRow = {
   item_id: string;
@@ -11,6 +11,9 @@ export type MarginImpactRow = {
   baseline_total_margin?: number;
 
   simulated_unit_price?: number;
+  simulated_unit_cost?: number;
+  simulated_volume?: number;
+
   simulated_margin_per_unit?: number;
   simulated_total_margin?: number;
 
@@ -27,6 +30,20 @@ export type MarginImpactRow = {
   };
 
   notes: string[];
+
+  // ---- compatibility fields expected by explain + assert-effects ----
+  bp?: number | null;
+  bc?: number | null;
+  bv?: number | null;
+
+  sp?: number | null;
+  sc?: number | null;
+  sv?: number | null;
+
+  price_effect?: number | null;
+  cost_effect?: number | null;
+  volume_effect?: number | null;
+  interaction_effect?: number | null;
 };
 
 export function computeMarginImpactFromSnapshots(s: DecisionSnapshots): MarginImpactRow[] {
@@ -61,13 +78,11 @@ export function computeMarginImpactFromSnapshots(s: DecisionSnapshots): MarginIm
     const sc = sim?.metrics.unit_cost.value ?? bc;
     const sv = sim?.metrics.volume.value ?? bv;
 
-    const simulated_margin_per_unit =
-        sp != null && sc != null ? sp - sc : undefined;
+    const simulated_margin_per_unit = sp != null && sc != null ? sp - sc : undefined;
 
     const simulated_total_margin =
-        simulated_margin_per_unit != null && sv != null
-            ? simulated_margin_per_unit * sv
-            : undefined;
+      simulated_margin_per_unit != null && sv != null ? simulated_margin_per_unit * sv : undefined;
+
     const delta_total_margin =
       simulated_total_margin != null && baseline_total_margin != null
         ? simulated_total_margin - baseline_total_margin
@@ -81,15 +96,21 @@ export function computeMarginImpactFromSnapshots(s: DecisionSnapshots): MarginIm
 
     rows.push({
       item_id,
+
       baseline_unit_price: bp,
       baseline_unit_cost: bc,
       baseline_volume: bv,
       baseline_margin_per_unit,
       baseline_total_margin,
+
       simulated_unit_price: sp,
+      simulated_unit_cost: sc,
+      simulated_volume: sv,
+
       simulated_margin_per_unit,
       simulated_total_margin,
       delta_total_margin,
+
       trace: {
         used_observations: {
           unit_price: b?.metrics.unit_price.from_observation_id,
@@ -99,11 +120,84 @@ export function computeMarginImpactFromSnapshots(s: DecisionSnapshots): MarginIm
         applied_change_ids,
         assumptions_used: [],
       },
+
       notes,
     });
   }
 
-  return rows;
+  // Add compatibility aliases + effects expected by explain + assert-effects
+  function withAliasesAndEffects(r: MarginImpactRow): MarginImpactRow {
+    const bp = typeof r.baseline_unit_price === "number" ? r.baseline_unit_price : null;
+    const bc = typeof r.baseline_unit_cost === "number" ? r.baseline_unit_cost : null;
+    const bv = typeof r.baseline_volume === "number" ? r.baseline_volume : null;
+
+    const sp = typeof r.simulated_unit_price === "number" ? r.simulated_unit_price : bp;
+    const sc = typeof r.simulated_unit_cost === "number" ? r.simulated_unit_cost : bc;
+    const sv = typeof r.simulated_volume === "number" ? r.simulated_volume : bv;
+
+    // ensure totals exist (some callers only rely on these)
+    const baseline_total_margin =
+      typeof r.baseline_total_margin === "number"
+        ? r.baseline_total_margin
+        : bp != null && bc != null && bv != null
+        ? (bp - bc) * bv
+        : undefined;
+
+    const simulated_total_margin =
+      typeof r.simulated_total_margin === "number"
+        ? r.simulated_total_margin
+        : sp != null && sc != null && sv != null
+        ? (sp - sc) * sv
+        : undefined;
+
+    const delta_total_margin =
+      typeof r.delta_total_margin === "number"
+        ? r.delta_total_margin
+        : simulated_total_margin != null && baseline_total_margin != null
+        ? simulated_total_margin - baseline_total_margin
+        : undefined;
+
+    // 3-way decomposition effects
+    const price_effect = sp != null && bp != null && bv != null ? (sp - bp) * bv : null;
+
+    const cost_effect = sc != null && bc != null && bv != null ? -(sc - bc) * bv : null;
+
+    const volume_effect =
+      sv != null && bv != null && bp != null && bc != null ? (sv - bv) * (bp - bc) : null;
+
+    const interaction_effect =
+      delta_total_margin != null &&
+      price_effect != null &&
+      cost_effect != null &&
+      volume_effect != null
+        ? delta_total_margin - (price_effect + cost_effect + volume_effect)
+        : null;
+
+    return {
+      ...r,
+
+      // keep “real” totals if present, else computed
+      baseline_total_margin,
+      simulated_total_margin,
+      delta_total_margin,
+
+      // aliases
+      bp,
+      bc,
+      bv,
+      sp,
+      sc,
+      sv,
+
+      // effects
+      price_effect,
+      cost_effect,
+      volume_effect,
+      interaction_effect,
+    };
+  }
+
+  return rows.map(withAliasesAndEffects);
 }
 
 function uniq(xs: string[]): string[] {

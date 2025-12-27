@@ -3,13 +3,25 @@ import type { DecisionSnapshots } from "../../simulate/src/snapshot.js";
 export type ContributionRow = {
   item_id: string;
 
-  // baseline
+  // ---------- expanded (new/compat for other tooling) ----------
+  baseline_unit_price: number | null;
+  baseline_unit_cost: number | null;
+  baseline_volume: number | null;
+  baseline_margin_per_unit: number | null;
+
+  simulated_unit_price: number | null;
+  simulated_unit_cost: number | null;
+  simulated_volume: number | null;
+  simulated_margin_per_unit: number | null;
+  // ------------------------------------------------------------
+
+  // baseline (short aliases used by explain layer + assert-effects)
   bp: number | null;
   bc: number | null;
   bv: number | null;
   baseline_total_margin: number | null;
 
-  // simulated
+  // simulated (short aliases used by explain layer + assert-effects)
   sp: number | null;
   sc: number | null;
   sv: number | null;
@@ -22,6 +34,9 @@ export type ContributionRow = {
   interaction_effect: number | null;
 
   delta_total_margin: number | null;
+
+  // optional debugging surface (safe for old consumers)
+  notes?: string[];
 };
 
 export function computeContributionFromSnapshots(s: DecisionSnapshots): ContributionRow[] {
@@ -38,14 +53,36 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
     const b = baselineByItem.get(item_id);
     const sim = simByItem.get(item_id);
 
-    const bp = numOrNull(b?.metrics?.unit_price?.value);
-    const bc = numOrNull(b?.metrics?.unit_cost?.value);
-    const bv = numOrNull(b?.metrics?.volume?.value);
+    const notes: string[] = [];
 
-    // Use simulated if present; fallback to baseline like your margins.ts
-    const sp = numOrNull(sim?.metrics?.unit_price?.value ?? bp);
-    const sc = numOrNull(sim?.metrics?.unit_cost?.value ?? bc);
-    const sv = numOrNull(sim?.metrics?.volume?.value ?? bv);
+    const baseline_unit_price = numOrNull(b?.metrics?.unit_price?.value);
+    const baseline_unit_cost = numOrNull(b?.metrics?.unit_cost?.value);
+    const baseline_volume = numOrNull(b?.metrics?.volume?.value);
+
+    // Use simulated if present; fallback to baseline (matches your earlier intent)
+    const simulated_unit_price = numOrNull(sim?.metrics?.unit_price?.value ?? baseline_unit_price);
+    const simulated_unit_cost = numOrNull(sim?.metrics?.unit_cost?.value ?? baseline_unit_cost);
+    const simulated_volume = numOrNull(sim?.metrics?.volume?.value ?? baseline_volume);
+
+    // Margin per unit
+    const baseline_margin_per_unit =
+      baseline_unit_price != null && baseline_unit_cost != null
+        ? baseline_unit_price - baseline_unit_cost
+        : null;
+
+    const simulated_margin_per_unit =
+      simulated_unit_price != null && simulated_unit_cost != null
+        ? simulated_unit_price - simulated_unit_cost
+        : null;
+
+    // Short alias fields expected by explain layer + assert-effects
+    const bp = baseline_unit_price;
+    const bc = baseline_unit_cost;
+    const bv = baseline_volume;
+
+    const sp = simulated_unit_price;
+    const sc = simulated_unit_cost;
+    const sv = simulated_volume;
 
     const baseline_total_margin =
       bp != null && bc != null && bv != null ? (bp - bc) * bv : null;
@@ -58,12 +95,10 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
         ? simulated_total_margin - baseline_total_margin
         : null;
 
-    // Standard 3-way decomposition (same formulas you’re already using in explain)
-    const price_effect =
-      sp != null && bp != null && bv != null ? (sp - bp) * bv : null;
+    // 3-way decomposition (standard)
+    const price_effect = sp != null && bp != null && bv != null ? (sp - bp) * bv : null;
 
-    const cost_effect =
-      sc != null && bc != null && bv != null ? -(sc - bc) * bv : null;
+    const cost_effect = sc != null && bc != null && bv != null ? -(sc - bc) * bv : null;
 
     const volume_effect =
       sv != null && bv != null && bp != null && bc != null ? (sv - bv) * (bp - bc) : null;
@@ -76,8 +111,26 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
         ? delta_total_margin - (price_effect + cost_effect + volume_effect)
         : null;
 
+    // Helpful notes if something is missing
+    if (bp == null) notes.push("missing baseline_unit_price");
+    if (bc == null) notes.push("missing baseline_unit_cost");
+    if (bv == null) notes.push("missing baseline_volume");
+
     rows.push({
       item_id,
+
+      // expanded
+      baseline_unit_price,
+      baseline_unit_cost,
+      baseline_volume,
+      baseline_margin_per_unit,
+
+      simulated_unit_price,
+      simulated_unit_cost,
+      simulated_volume,
+      simulated_margin_per_unit,
+
+      // aliases
       bp,
       bc,
       bv,
@@ -86,11 +139,16 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
       sc,
       sv,
       simulated_total_margin,
+
+      // totals + effects
       delta_total_margin,
       price_effect,
       cost_effect,
       volume_effect,
       interaction_effect,
+
+      // optional
+      notes: notes.length ? notes : undefined,
     });
   }
 
@@ -100,3 +158,4 @@ export function computeContributionFromSnapshots(s: DecisionSnapshots): Contribu
 function numOrNull(x: unknown): number | null {
   return typeof x === "number" && Number.isFinite(x) ? x : null;
 }
+

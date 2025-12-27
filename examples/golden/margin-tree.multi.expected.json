@@ -13,7 +13,7 @@
       {
         "name": "simulated_total_margin",
         "formula": "(price - cost) * volume",
-        "substituted": "(price - cost) * volume",
+        "substituted": "(17.24 - 5.50) * 900",
         "value": 10567.741008714534
       },
       {
@@ -25,80 +25,80 @@
       {
         "name": "cost_effect",
         "formula": "-(sc - bc) * bv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-(5.50 - 5) * 1000",
+        "value": -500
       },
       {
         "name": "cost_elasticity",
         "formula": "cost_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-500 / 5000",
+        "value": -0.1
       },
       {
         "name": "cost_sensitivity_1pct",
         "formula": "-0.01 * sc * sv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-0.01 * 5.50 * 900",
+        "value": -49.5
       },
       {
         "name": "expected_unit_price",
         "formula": "bp*(1-active_fraction) + abs_price*(active_fraction)",
-        "substituted": "null (missing bp)",
+        "substituted": "10*(1-?) + ?*(?) (missing abs_price/active_fraction)",
         "value": null
       },
       {
         "name": "interaction_effect",
         "formula": "delta - (price_effect + cost_effect + volume_effect)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "5567.74 - (7241.93 + -500 + -500)",
+        "value": -674.1934454127259
       },
       {
         "name": "price_effect",
         "formula": "(sp - bp) * bv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "(17.24 - 10) * 1000",
+        "value": 7241.93445412726
       },
       {
         "name": "price_elasticity",
         "formula": "price_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "7241.93 / 5000",
+        "value": 1.448386890825452
       },
       {
         "name": "price_sensitivity_1pct",
         "formula": "0.01 * sp * sv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "0.01 * 17.24 * 900",
+        "value": 155.17741008714535
       },
       {
         "name": "primary_margin_driver",
         "formula": "argmax(|price|, |cost|, |volume|)",
-        "substituted": "unknown",
+        "substituted": "price",
         "value": null
       },
       {
         "name": "recommendation",
         "formula": "interpret(primary_margin_driver)",
-        "substituted": "No dominant lever identified",
+        "substituted": "Pricing is the dominant margin lever",
         "value": null
       },
       {
         "name": "volume_effect",
         "formula": "(sv - bv) * (bp - bc)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "(900 - 1000) * (10 - 5)",
+        "value": -500
       },
       {
         "name": "volume_elasticity",
         "formula": "volume_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-500 / 5000",
+        "value": -0.1
       },
       {
         "name": "volume_sensitivity_1pct",
         "formula": "0.01 * sv * (sp - sc)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "0.01 * 900 * (17.24 - 5.50)",
+        "value": 105.67741008714535
       }
     ],
     "result": {
@@ -122,7 +122,7 @@
       {
         "name": "simulated_total_margin",
         "formula": "(price - cost) * volume",
-        "substituted": "(price - cost) * volume",
+        "substituted": "(15.83 - 6.75) * 600",
         "value": 5449.354353104224
       },
       {
@@ -134,80 +134,80 @@
       {
         "name": "cost_effect",
         "formula": "-(sc - bc) * bv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-(6.75 - 6.50) * 500",
+        "value": -125
       },
       {
         "name": "cost_elasticity",
         "formula": "cost_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-125 / 2750",
+        "value": -0.045454545454545456
       },
       {
         "name": "cost_sensitivity_1pct",
         "formula": "-0.01 * sc * sv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "-0.01 * 6.75 * 600",
+        "value": -40.5
       },
       {
         "name": "expected_unit_price",
         "formula": "bp*(1-active_fraction) + abs_price*(active_fraction)",
-        "substituted": "null (missing bp)",
+        "substituted": "12*(1-?) + ?*(?) (missing abs_price/active_fraction)",
         "value": null
       },
       {
         "name": "interaction_effect",
         "formula": "delta - (price_effect + cost_effect + volume_effect)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "2699.35 - (1916.13 + -125 + 550)",
+        "value": 358.22572551737085
       },
       {
         "name": "price_effect",
         "formula": "(sp - bp) * bv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "(15.83 - 12) * 500",
+        "value": 1916.128627586853
       },
       {
         "name": "price_elasticity",
         "formula": "price_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "1916.13 / 2750",
+        "value": 0.6967740463952193
       },
       {
         "name": "price_sensitivity_1pct",
         "formula": "0.01 * sp * sv",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "0.01 * 15.83 * 600",
+        "value": 94.99354353104223
       },
       {
         "name": "primary_margin_driver",
         "formula": "argmax(|price|, |cost|, |volume|)",
-        "substituted": "unknown",
+        "substituted": "price",
         "value": null
       },
       {
         "name": "recommendation",
         "formula": "interpret(primary_margin_driver)",
-        "substituted": "No dominant lever identified",
+        "substituted": "Pricing is the dominant margin lever",
         "value": null
       },
       {
         "name": "volume_effect",
         "formula": "(sv - bv) * (bp - bc)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "(600 - 500) * (12 - 6.50)",
+        "value": 550
       },
       {
         "name": "volume_elasticity",
         "formula": "volume_effect / baseline_total_margin",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "550 / 2750",
+        "value": 0.2
       },
       {
         "name": "volume_sensitivity_1pct",
         "formula": "0.01 * sv * (sp - sc)",
-        "substituted": "null (computed)",
-        "value": null
+        "substituted": "0.01 * 600 * (15.83 - 6.75)",
+        "value": 54.493543531042235
       }
     ],
     "result": {
