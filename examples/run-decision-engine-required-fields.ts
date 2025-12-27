@@ -1,7 +1,7 @@
-import { createDecisionV1, applyDecisionEvent } from "../packages/decision/src/engine.js";
+import { createDecisionV2, applyDecisionEvent } from "../packages/decision/src/engine.js";
 
 function main() {
-  let d = createDecisionV1({ decision_id: "dec_req" });
+  let d = createDecisionV2({ decision_id: "dec_req" });
 
   // Should fail (meta missing title + owner_id)
   console.log(applyDecisionEvent(d, { type: "VALIDATE", actor_id: "user_1" } as any));
