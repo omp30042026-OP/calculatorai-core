@@ -1,42 +1,42 @@
 import { z } from "zod";
+import type { DecisionEventType } from "./state-machine.js";
 
-/**
- * Event payloads are intentionally small and generic.
- * Any company-specific data goes in meta (adapter layer).
- */
+const BaseEventSchema = z.object({
+  type: z.custom<DecisionEventType>(),
+  actor_id: z.string().optional(),
+  meta: z.record(z.string(), z.unknown()).optional(),
+});
 
-export const DecisionEventSchema = z.discriminatedUnion("type", [
-  z.object({
-    type: z.literal("VALIDATE"),
-    actor_id: z.string().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-  }),
+export const ValidateEventSchema = BaseEventSchema.extend({
+  type: z.literal("VALIDATE"),
+});
 
-  z.object({
-    type: z.literal("SIMULATE"),
-    actor_id: z.string().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-  }),
+export const SimulateEventSchema = BaseEventSchema.extend({
+  type: z.literal("SIMULATE"),
+  simulation_snapshot_id: z.string().optional(), // V2 artifact hook
+});
 
-  z.object({
-    type: z.literal("EXPLAIN"),
-    actor_id: z.string().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-  }),
+export const ExplainEventSchema = BaseEventSchema.extend({
+  type: z.literal("EXPLAIN"),
+  explain_tree_id: z.string().optional(), // V2 artifact hook
+});
 
-  z.object({
-    type: z.literal("APPROVE"),
-    actor_id: z.string().optional(),
-    reason: z.string().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-  }),
+export const ApproveEventSchema = BaseEventSchema.extend({
+  type: z.literal("APPROVE"),
+});
 
-  z.object({
-    type: z.literal("REJECT"),
-    actor_id: z.string().optional(),
-    reason: z.string().optional(),
-    meta: z.record(z.string(), z.unknown()).optional(),
-  }),
+export const RejectEventSchema = BaseEventSchema.extend({
+  type: z.literal("REJECT"),
+  reason: z.string().optional(),
+});
+
+export const DecisionEventSchema = z.union([
+  ValidateEventSchema,
+  SimulateEventSchema,
+  ExplainEventSchema,
+  ApproveEventSchema,
+  RejectEventSchema,
 ]);
 
 export type DecisionEvent = z.infer<typeof DecisionEventSchema>;
+

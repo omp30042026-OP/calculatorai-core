@@ -4,74 +4,45 @@ import type { DecisionEvent } from "./events.js";
 export type PolicyViolation = {
   code: string;
   message: string;
-  meta?: Record<string, unknown> | null;
+  meta?: Record<string, unknown>;
 };
 
-export type PolicyResult = { ok: true } | { ok: false; violations: PolicyViolation[] };
+export type PolicyResult =
+  | { ok: true }
+  | { ok: false; violations: PolicyViolation[] };
 
 export type DecisionPolicy = (ctx: { decision: Decision; event: DecisionEvent }) => PolicyResult;
 
-/**
- * Require certain meta keys to be present (and non-empty) before allowing VALIDATE.
- * This keeps the state machine pure and puts business rules in policies.
- */
-export function requireMetaKeysBeforeValidate(
-  requiredKeys: string[],
-  opts: { allowEmptyString?: boolean } = {}
-): DecisionPolicy {
-  const allowEmptyString = opts.allowEmptyString ?? false;
+export function defaultPolicies(): DecisionPolicy[] {
+  return [requireMetaOnValidatePolicy()];
+}
 
+/**
+ * V2: Only requires fields in decision.meta (NOT artifacts).
+ * Required keys (example): title, owner_id
+ */
+function requireMetaOnValidatePolicy(): DecisionPolicy {
   return ({ decision, event }) => {
     if (event.type !== "VALIDATE") return { ok: true };
 
     const meta = (decision.meta ?? {}) as Record<string, unknown>;
     const missing: string[] = [];
 
-    for (const k of requiredKeys) {
-      const v = meta[k];
+    if (typeof meta.title !== "string" || meta.title.trim().length === 0) missing.push("title");
+    if (typeof meta.owner_id !== "string" || meta.owner_id.trim().length === 0) missing.push("owner_id");
 
-      if (v == null) {
-        missing.push(k);
-        continue;
-      }
+    if (missing.length === 0) return { ok: true };
 
-      if (typeof v === "string") {
-        const trimmed = v.trim();
-        if (!allowEmptyString && trimmed.length === 0) missing.push(k);
-        continue;
-      }
-
-      // If array -> must have items
-      if (Array.isArray(v) && v.length === 0) {
-        missing.push(k);
-        continue;
-      }
-    }
-
-    if (missing.length > 0) {
-      return {
-        ok: false,
-        violations: [
-          {
-            code: "MISSING_REQUIRED_FIELDS",
-            message: `Cannot VALIDATE: missing required meta fields: ${missing.join(", ")}.`,
-            meta: { missing },
-          },
-        ],
-      };
-    }
-
-    return { ok: true };
+    return {
+      ok: false,
+      violations: [
+        {
+          code: "MISSING_REQUIRED_FIELDS",
+          message: `Cannot VALIDATE: missing required meta fields: ${missing.join(", ")}.`,
+          meta: { missing },
+        },
+      ],
+    };
   };
 }
 
-/**
- * Default policies for the engine.
- * You can expand this over time (e.g., approvals, risk thresholds, etc.)
- */
-export function defaultPolicies(): DecisionPolicy[] {
-  return [
-    // V2 core: required fields before VALIDATE
-    requireMetaKeysBeforeValidate(["title", "owner_id"]),
-  ];
-}
