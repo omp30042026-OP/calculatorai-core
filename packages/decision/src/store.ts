@@ -2,19 +2,22 @@
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
 
+/**
+ * One persisted event row.
+ * `idempotency_key` is optional but strongly recommended for safe retries.
+ */
 export type DecisionEventRecord = {
   decision_id: string;
-  seq: number;
+  seq: number; // monotonically increasing per decision_id
   at: string; // ISO timestamp
   event: DecisionEvent;
-
-  // V3: safe retries (optional)
-  idempotency_key?: string;
+  idempotency_key?: string | null;
 };
 
-export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq"> & {
-  idempotency_key?: string;
-};
+/**
+ * Input for appending a new event (store assigns decision_id + seq).
+ */
+export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
 
 export type DecisionStore = {
   // decisions
@@ -23,17 +26,19 @@ export type DecisionStore = {
   getDecision(decision_id: string): Promise<Decision | null>;
   getRootDecision(decision_id: string): Promise<Decision | null>;
 
-  // events
+  // events (append-only)
   appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord>;
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
-  // V3: helpers (optional but recommended)
+  /**
+   * Optional helpers for stronger guarantees in store-engine.
+   * If not provided, store-engine will fall back to simpler behavior.
+   */
+  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
   getCurrentVersion?(decision_id: string): Promise<number | null>;
   findEventByIdempotencyKey?(
     decision_id: string,
-    key: string
+    idempotency_key: string
   ): Promise<DecisionEventRecord | null>;
-
-  // V3: atomicity hook (store-engine will use if present)
-  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
 };
+
