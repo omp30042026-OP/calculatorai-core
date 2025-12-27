@@ -4,55 +4,74 @@ import type { DecisionEvent } from "./events.js";
 export type PolicyViolation = {
   code: string;
   message: string;
+  meta?: Record<string, unknown> | null;
 };
 
-export type PolicyResult =
-  | { ok: true }
-  | { ok: false; violations: PolicyViolation[] };
+export type PolicyResult = { ok: true } | { ok: false; violations: PolicyViolation[] };
 
-export type DecisionPolicy = (args: {
-  decision: Decision;
-  event: DecisionEvent;
-}) => PolicyResult;
+export type DecisionPolicy = (ctx: { decision: Decision; event: DecisionEvent }) => PolicyResult;
 
-export function ok(): PolicyResult {
-  return { ok: true };
-}
+/**
+ * Require certain meta keys to be present (and non-empty) before allowing VALIDATE.
+ * This keeps the state machine pure and puts business rules in policies.
+ */
+export function requireMetaKeysBeforeValidate(
+  requiredKeys: string[],
+  opts: { allowEmptyString?: boolean } = {}
+): DecisionPolicy {
+  const allowEmptyString = opts.allowEmptyString ?? false;
 
-export function fail(...violations: PolicyViolation[]): PolicyResult {
-  return { ok: false, violations };
+  return ({ decision, event }) => {
+    if (event.type !== "VALIDATE") return { ok: true };
+
+    const meta = (decision.meta ?? {}) as Record<string, unknown>;
+    const missing: string[] = [];
+
+    for (const k of requiredKeys) {
+      const v = meta[k];
+
+      if (v == null) {
+        missing.push(k);
+        continue;
+      }
+
+      if (typeof v === "string") {
+        const trimmed = v.trim();
+        if (!allowEmptyString && trimmed.length === 0) missing.push(k);
+        continue;
+      }
+
+      // If array -> must have items
+      if (Array.isArray(v) && v.length === 0) {
+        missing.push(k);
+        continue;
+      }
+    }
+
+    if (missing.length > 0) {
+      return {
+        ok: false,
+        violations: [
+          {
+            code: "MISSING_REQUIRED_FIELDS",
+            message: `Cannot VALIDATE: missing required meta fields: ${missing.join(", ")}.`,
+            meta: { missing },
+          },
+        ],
+      };
+    }
+
+    return { ok: true };
+  };
 }
 
 /**
- * v1 default policies: deterministic + minimal, but enterprise-grade.
+ * Default policies for the engine.
+ * You can expand this over time (e.g., approvals, risk thresholds, etc.)
  */
 export function defaultPolicies(): DecisionPolicy[] {
-  return [policyCannotApproveWithoutExplain(), policyCannotSimulateWithoutValidate()];
+  return [
+    // V2 core: required fields before VALIDATE
+    requireMetaKeysBeforeValidate(["title", "owner_id"]),
+  ];
 }
-
-export function policyCannotApproveWithoutExplain(): DecisionPolicy {
-  return ({ decision, event }) => {
-    if (event.type !== "APPROVE") return ok();
-    if (decision.state !== "EXPLAINED") {
-      return fail({
-        code: "APPROVE_REQUIRES_EXPLAINED",
-        message: `Cannot APPROVE unless state is EXPLAINED. Current: ${decision.state}`,
-      });
-    }
-    return ok();
-  };
-}
-
-export function policyCannotSimulateWithoutValidate(): DecisionPolicy {
-  return ({ decision, event }) => {
-    if (event.type !== "SIMULATE") return ok();
-    if (decision.state !== "VALIDATED") {
-      return fail({
-        code: "SIMULATE_REQUIRES_VALIDATED",
-        message: `Cannot SIMULATE unless state is VALIDATED. Current: ${decision.state}`,
-      });
-    }
-    return ok();
-  };
-}
-
