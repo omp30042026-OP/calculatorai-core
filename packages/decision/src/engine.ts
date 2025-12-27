@@ -18,10 +18,6 @@ function isLockedState(s: Decision["state"]): boolean {
   return s === "APPROVED" || s === "REJECTED";
 }
 
-function severityOf(v: PolicyViolation): "WARN" | "BLOCK" {
-  return (v as any).severity === "WARN" ? "WARN" : "BLOCK";
-}
-
 export function applyDecisionEvent(
   decision: Decision,
   event: DecisionEvent,
@@ -38,16 +34,14 @@ export function applyDecisionEvent(
       violations: [
         {
           code: "LOCKED_DECISION",
+          severity: "BLOCK",
           message: `Decision is locked in state ${decision.state}; cannot apply ${event.type}.`,
-          // if your PolicyViolation type includes severity, policy.ts can set it;
-          // engine defaults to BLOCK if missing
-          ...(typeof (decision as any) === "object" ? { severity: "BLOCK" } : {}),
-        } as any,
+        },
       ],
     };
   }
 
-  // 1) Artifact-only event does not change state (but is audited + policy checked)
+  // 1) Artifact attachment does not change state
   const isArtifactOnly = event.type === "ATTACH_ARTIFACTS";
 
   // 2) Compute next state unless artifact-only
@@ -62,9 +56,9 @@ export function applyDecisionEvent(
       violations: [
         {
           code: "INVALID_TRANSITION",
-          message: `Event ${event.type} is not valid from state ${decision.state}.`,
           severity: "BLOCK",
-        } as any,
+          message: `Event ${event.type} is not valid from state ${decision.state}.`,
+        },
       ],
     };
   }
@@ -77,20 +71,21 @@ export function applyDecisionEvent(
     const r = p({ decision, event });
     if (!r.ok) {
       for (const v of r.violations) {
-        if (severityOf(v) === "WARN") warnings.push(v);
+        if (v.severity === "WARN") warnings.push(v);
         else violations.push(v);
       }
     }
   }
 
-  if (violations.length > 0) return { ok: false, decision, violations };
+  if (violations.length > 0) {
+    return { ok: false, decision, violations };
+  }
 
-  // 4) Apply transition + audit entry (+ artifacts merge if needed)
+  // 4) Apply transition + audit event
   const next: Decision = {
     ...decision,
     state: event.type === "REJECT" ? "REJECTED" : nextState,
     updated_at: now(),
-
     artifacts:
       event.type === "ATTACH_ARTIFACTS"
         ? {
@@ -102,7 +97,6 @@ export function applyDecisionEvent(
             },
           }
         : decision.artifacts,
-
     history: [
       ...(decision.history ?? []),
       {
@@ -120,7 +114,7 @@ export function applyDecisionEvent(
 
 /**
  * Deterministic replay:
- * Same starting decision + same events => same resulting decision (given deterministic `now`)
+ * - Same starting decision + same events => same resulting decision (given deterministic `now`)
  */
 export function replayDecision(
   start: Decision,
@@ -140,6 +134,62 @@ export function replayDecision(
   return { ok: true, decision: cur, warnings: allWarnings };
 }
 
-// Convenience creator for v2/v3 users
+// -------------------------
+// V4: Forking / What-if
+// -------------------------
+export type ForkDecisionInput = {
+  decision_id: string; // required id for the new fork
+  meta?: Record<string, unknown>; // optional override (merged)
+  artifacts?: Decision["artifacts"]; // optional override (merged)
+};
+
+/**
+ * forkDecision:
+ * - parent must NOT be REJECTED
+ * - fork always starts at DRAFT
+ * - version increments
+ * - parent_decision_id is set
+ * - copies meta/artifacts (merge overrides)
+ * - history resets to []
+ */
+export function forkDecision(
+  parent: Decision,
+  input: ForkDecisionInput,
+  opts: DecisionEngineOptions = {}
+): Decision {
+  if (parent.state === "REJECTED") {
+    throw new Error(`Cannot fork a REJECTED decision (${parent.decision_id}).`);
+  }
+
+  const now = opts.now ?? (() => new Date().toISOString());
+
+  const mergedMeta: Record<string, unknown> = {
+    ...(parent.meta ?? {}),
+    ...(input.meta ?? {}),
+  };
+
+  const mergedArtifacts: Decision["artifacts"] = {
+    ...(parent.artifacts ?? {}),
+    ...(input.artifacts ?? {}),
+    extra: {
+      ...(((parent.artifacts as any)?.extra ?? {}) as Record<string, unknown>),
+      ...((((input.artifacts as any)?.extra ?? {}) as Record<string, unknown>)),
+    },
+  };
+
+  return createDecisionV2(
+    {
+      decision_id: input.decision_id,
+      parent_decision_id: parent.decision_id,
+      version: (parent.version ?? 1) + 1,
+      meta: mergedMeta,
+      artifacts: mergedArtifacts as any,
+    },
+    now
+  );
+}
+
+// Convenience creator for v2 users
 export { createDecisionV2 };
+
 

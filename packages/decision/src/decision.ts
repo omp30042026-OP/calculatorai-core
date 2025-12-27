@@ -12,21 +12,24 @@ export type DecisionState = z.infer<typeof DecisionStateSchema>;
 
 export const DecisionHistoryEntrySchema = z.object({
   at: z.string(), // ISO timestamp
-  type: z.string(), // event type string
+  type: z.string(),
   actor_id: z.string().nullable(),
   reason: z.string().nullable(),
   meta: z.record(z.string(), z.unknown()).nullable(),
 });
 export type DecisionHistoryEntry = z.infer<typeof DecisionHistoryEntrySchema>;
 
-export const DecisionArtifactsSchema = z.object({
-  explain_tree_id: z.string().optional(),
-  simulation_snapshot_id: z.string().optional(),
-  margin_snapshot_id: z.string().optional(),
-  risk_report_id: z.string().optional(),
-  // keep it flexible for future additions
-  extra: z.record(z.string(), z.unknown()).optional(),
-});
+export const DecisionArtifactsSchema = z
+  .object({
+    explain_tree_id: z.string().optional(),
+    margin_snapshot_id: z.string().optional(),
+    risk_report_id: z.string().optional(),
+    // keep it flexible for future
+    extra: z.record(z.string(), z.unknown()).optional(),
+  })
+  .default({});
+
+export type DecisionArtifacts = z.infer<typeof DecisionArtifactsSchema>;
 
 export const DecisionSchema = z.object({
   decision_id: z.string(),
@@ -41,8 +44,7 @@ export const DecisionSchema = z.object({
   // free-form, but required fields can be enforced by policies
   meta: z.record(z.string(), z.unknown()).default({}),
 
-  // artifacts are structured but allow extra flexibility
-  artifacts: DecisionArtifactsSchema.default({}),
+  artifacts: DecisionArtifactsSchema,
 
   history: z.array(DecisionHistoryEntrySchema).default([]),
 });
@@ -56,7 +58,6 @@ export type CreateDecisionInput = {
   version?: number;
   artifacts?: {
     explain_tree_id?: string;
-    simulation_snapshot_id?: string;
     margin_snapshot_id?: string;
     risk_report_id?: string;
     extra?: Record<string, unknown>;
@@ -87,3 +88,4 @@ export function createDecisionV2(
 
   return DecisionSchema.parse(d);
 }
+

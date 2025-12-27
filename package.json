@@ -19,8 +19,9 @@
     "decision:blocked": "tsx examples/run-decision-engine-blocked.ts > /dev/null",
     "decision:required": "tsx examples/run-decision-engine-required-fields.ts > /dev/null",
     "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
+    "decision:fork": "tsx examples/run-decision-engine-fork.ts > /dev/null",
 
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts"
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork"
   },
   "keywords": [],
   "author": "",
