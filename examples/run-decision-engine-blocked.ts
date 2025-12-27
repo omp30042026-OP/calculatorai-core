@@ -1,13 +1,10 @@
 import { createDecisionV2, applyDecisionEvent } from "../packages/decision/src/engine.js";
 
-function main() {
-  let d = createDecisionV2({ decision_id: "dec_blocked" });
+const d = createDecisionV2({
+  decision_id: "dec_blocked",
+  meta: { title: "Blocked", owner_id: "user_1" },
+});
 
-  // invalid: trying to APPROVE from DRAFT
-  const r = applyDecisionEvent(d, { type: "APPROVE", actor_id: "user_1" } as any);
-
-  console.log(JSON.stringify(r, null, 2));
-}
-
-main();
+const r = applyDecisionEvent(d, { type: "APPROVE", actor_id: "user_1" } as const);
+console.log(JSON.stringify(r, null, 2));
 
