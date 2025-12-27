@@ -30,11 +30,13 @@ export type DecisionStore = {
   appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord>;
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
+  // OPTIONAL: efficient delta read for snapshots (events with seq > after_seq)
+  listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
+
   /**
    * Optional helpers for stronger guarantees in store-engine.
-   * If not provided, store-engine will fall back to simpler behavior.
+   * If not provided, store-engine falls back to simpler behavior.
    */
-  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
   getCurrentVersion?(decision_id: string): Promise<number | null>;
   findEventByIdempotencyKey?(
     decision_id: string,

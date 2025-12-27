@@ -13,14 +13,9 @@ export class SqliteDecisionStore implements DecisionStore {
     this.migrate();
   }
 
-  // ---- V3: atomic transaction hook ----
-  async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    const tx = this.db.transaction(() => {
-      // we can't await inside better-sqlite3 tx directly,
-      // so we require fn() to be sync-ish. We'll still support Promise
-      // by executing and returning the result.
-      return fn();
-    });
+  // ---- atomic transaction hook (SYNC for better-sqlite3) ----
+  runInTransaction<T>(fn: () => T): T {
+    const tx = this.db.transaction(() => fn());
     return tx();
   }
 
@@ -30,7 +25,6 @@ export class SqliteDecisionStore implements DecisionStore {
   }
 
   private migrate() {
-    // base schema
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decisions (
         decision_id TEXT NOT NULL,
@@ -60,14 +54,12 @@ export class SqliteDecisionStore implements DecisionStore {
         ON decision_events(decision_id, seq);
     `);
 
-    // V3: idempotency uniqueness
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idem
         ON decision_events(decision_id, idempotency_key)
         WHERE idempotency_key IS NOT NULL;
     `);
 
-    // handle older db missing the column (if any)
     if (!this.columnExists("decision_events", "idempotency_key")) {
       this.db.exec(`ALTER TABLE decision_events ADD COLUMN idempotency_key TEXT;`);
       this.db.exec(`
@@ -79,17 +71,19 @@ export class SqliteDecisionStore implements DecisionStore {
   }
 
   async createDecision(decision: Decision): Promise<void> {
-    const stmt = this.db.prepare(`
-      INSERT OR IGNORE INTO decisions(decision_id, version, is_root, is_current, decision_json)
-      VALUES (@decision_id, @version, @is_root, 0, @decision_json)
-    `);
-
-    stmt.run({
-      decision_id: decision.decision_id,
-      version: decision.version,
-      is_root: decision.version === 1 ? 1 : 0,
-      decision_json: JSON.stringify(decision),
-    });
+    this.db
+      .prepare(
+        `
+        INSERT OR IGNORE INTO decisions(decision_id, version, is_root, is_current, decision_json)
+        VALUES (@decision_id, @version, @is_root, 0, @decision_json)
+      `
+      )
+      .run({
+        decision_id: decision.decision_id,
+        version: decision.version,
+        is_root: decision.version === 1 ? 1 : 0,
+        decision_json: JSON.stringify(decision),
+      });
   }
 
   async putDecision(decision: Decision): Promise<void> {
@@ -99,7 +93,8 @@ export class SqliteDecisionStore implements DecisionStore {
         .run(decision.decision_id);
 
       this.db
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO decisions(decision_id, version, is_root, is_current, decision_json)
           VALUES (@decision_id, @version, @is_root, 1, @decision_json)
           ON CONFLICT(decision_id, version)
@@ -107,7 +102,8 @@ export class SqliteDecisionStore implements DecisionStore {
             is_root = excluded.is_root,
             is_current = 1,
             decision_json = excluded.decision_json
-        `)
+        `
+        )
         .run({
           decision_id: decision.decision_id,
           version: decision.version,
@@ -171,7 +167,6 @@ export class SqliteDecisionStore implements DecisionStore {
   }
 
   async appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord> {
-    // idempotency: return existing if already appended
     if (input.idempotency_key) {
       const existing = await this.findEventByIdempotencyKey(decision_id, input.idempotency_key);
       if (existing) return existing;

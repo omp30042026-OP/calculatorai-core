@@ -6,6 +6,11 @@ import type { DecisionEvent } from "../packages/decision/src/events.js";
 import type { DecisionEngineOptions } from "../packages/decision/src/engine.js";
 import { applyEventWithStore } from "../packages/decision/src/store-engine.js";
 import type { DecisionEventRecord, DecisionStore } from "../packages/decision/src/store.js";
+import type {
+  DecisionSnapshot,
+  DecisionSnapshotStore,
+  SnapshotPolicy,
+} from "../packages/decision/src/snapshots.js";
 
 // ---- tiny assert helper ----
 function assert(cond: unknown, msg: string): asserts cond {
@@ -22,8 +27,7 @@ function makeDeterministicNow(startIso = "2025-01-01T00:00:00.000Z") {
   };
 }
 
-// ---- SQLite-backed DecisionStore ----
-// Key fix: store root/current separately via `kind` ("root" | "current")
+// ---- SQLite-backed DecisionStore (root/current separated via kind) ----
 class SqliteDecisionStore implements DecisionStore {
   private db: Database.Database;
 
@@ -59,7 +63,6 @@ class SqliteDecisionStore implements DecisionStore {
   }
 
   async createDecision(decision: Decision): Promise<void> {
-    // Treat createDecision as "ensure root exists"
     this.db
       .prepare(
         `
@@ -71,7 +74,6 @@ class SqliteDecisionStore implements DecisionStore {
   }
 
   async putDecision(decision: Decision): Promise<void> {
-    // Upsert "current" only (never overwrite root)
     this.db
       .prepare(
         `
@@ -86,7 +88,9 @@ class SqliteDecisionStore implements DecisionStore {
 
   async getDecision(decision_id: string): Promise<Decision | null> {
     const row = this.db
-      .prepare(`SELECT decision_json FROM decisions WHERE decision_id = ? AND kind = 'current' LIMIT 1`)
+      .prepare(
+        `SELECT decision_json FROM decisions WHERE decision_id = ? AND kind = 'current' LIMIT 1`
+      )
       .get(decision_id) as { decision_json: string } | undefined;
 
     return row ? (JSON.parse(row.decision_json) as Decision) : null;
@@ -149,17 +153,59 @@ class SqliteDecisionStore implements DecisionStore {
       event: JSON.parse(r.event_json) as DecisionEvent,
     }));
   }
+
+  // Optional fast delta reader for snapshots:
+  async listEventsFrom(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
+    const rows = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, event_json
+         FROM decision_events
+         WHERE decision_id = ? AND seq > ?
+         ORDER BY seq ASC`
+      )
+      .all(decision_id, after_seq) as Array<{
+      decision_id: string;
+      seq: number;
+      at: string;
+      event_json: string;
+    }>;
+
+    return rows.map((r) => ({
+      decision_id: r.decision_id,
+      seq: r.seq,
+      at: r.at,
+      event: JSON.parse(r.event_json) as DecisionEvent,
+    }));
+  }
+}
+
+// ---- simple in-memory snapshot store for the example ----
+class InMemorySnapshotStore implements DecisionSnapshotStore {
+  private latest = new Map<string, DecisionSnapshot>();
+
+  async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
+    return this.latest.get(decision_id) ?? null;
+  }
+
+  async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
+    const cur = this.latest.get(snapshot.decision_id);
+    if (!cur || snapshot.up_to_seq >= cur.up_to_seq) {
+      this.latest.set(snapshot.decision_id, snapshot);
+    }
+  }
 }
 
 // ---- demo ----
 async function main() {
   const store = new SqliteDecisionStore(":memory:"); // ✅ clean per run (best for npm run check)
+  const snapshotStore = new InMemorySnapshotStore();
+  const snapshotPolicy: SnapshotPolicy = { every_n_events: 2 };
+
   const now = makeDeterministicNow("2025-01-01T00:00:00.000Z");
   const opts: DecisionEngineOptions = { now };
 
   const decision_id = "dec_sqlite_001";
 
-  // VALIDATE (requires title + owner_id per policy)
   const r1 = await applyEventWithStore(
     store,
     {
@@ -170,25 +216,25 @@ async function main() {
         source: "sqlite-demo",
       },
       event: { type: "VALIDATE", actor_id: "system" },
+      snapshotStore,
+      snapshotPolicy,
     },
     opts
   );
-  if (!r1.ok) console.error("VALIDATE blocked:", r1.violations);
   assert(r1.ok, "validate failed");
 
-  // SIMULATE (valid after VALIDATED)
   const r2 = await applyEventWithStore(
     store,
     {
       decision_id,
       event: { type: "SIMULATE", actor_id: "system" },
+      snapshotStore,
+      snapshotPolicy,
     },
     opts
   );
-  if (!r2.ok) console.error("SIMULATE blocked:", r2.violations);
   assert(r2.ok, "simulate failed");
 
-  // Attach artifacts (no state change)
   const r3 = await applyEventWithStore(
     store,
     {
@@ -204,14 +250,17 @@ async function main() {
           },
         },
       },
+      snapshotStore,
+      snapshotPolicy,
     },
     opts
   );
-  if (!r3.ok) console.error("ATTACH_ARTIFACTS blocked:", r3.violations);
   assert(r3.ok, "attach artifacts failed");
 
   const current = await store.getDecision(decision_id);
   assert(current, "missing current decision");
+
+  const snap = await snapshotStore.getLatestSnapshot(decision_id);
 
   console.log(
     JSON.stringify(
@@ -220,6 +269,7 @@ async function main() {
         state: current.state,
         artifacts: current.artifacts ?? null,
         history_len: current.history?.length ?? 0,
+        snapshot_up_to_seq: snap?.up_to_seq ?? null,
       },
       null,
       2
