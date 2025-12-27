@@ -1,5 +1,6 @@
 import { transitionDecisionState } from "./state-machine.js";
 import type { Decision } from "./decision.js";
+import { createDecisionV2 } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
 import type { DecisionPolicy, PolicyViolation } from "./policy.js";
 import { defaultPolicies } from "./policy.js";
@@ -9,41 +10,18 @@ export type DecisionEngineOptions = {
   now?: () => string; // ISO timestamp
 };
 
-export type CreateDecisionV2Input = {
-  decision_id: string;
-  meta?: Record<string, unknown>;
-  artifacts?: Record<string, unknown>;
-};
-
 export type ApplyEventResult =
-  | { ok: true; decision: Decision }
+  | { ok: true; decision: Decision; warnings: PolicyViolation[] }
   | { ok: false; decision: Decision; violations: PolicyViolation[] };
 
-/**
- * V2 constructor:
- * - meta + artifacts exist and default to {}
- * - history starts empty
- */
-export function createDecisionV2(input: CreateDecisionV2Input, opts: DecisionEngineOptions = {}): Decision {
-  const now = opts.now ?? (() => new Date().toISOString());
-  return {
-    decision_id: input.decision_id,
-    state: "DRAFT",
-    created_at: now(),
-    updated_at: now(),
-    meta: input.meta ?? {},
-    artifacts: input.artifacts ?? {},
-    history: [],
-  };
+function isLockedState(s: Decision["state"]): boolean {
+  return s === "APPROVED" || s === "REJECTED";
 }
 
-/**
- * Applies a single event to a decision:
- * - enforces state machine
- * - runs policies
- * - appends audit history
- * - V2: writes artifact pointers when provided on events
- */
+function severityOf(v: PolicyViolation): "WARN" | "BLOCK" {
+  return (v as any).severity === "WARN" ? "WARN" : "BLOCK";
+}
+
 export function applyDecisionEvent(
   decision: Decision,
   event: DecisionEvent,
@@ -52,10 +30,32 @@ export function applyDecisionEvent(
   const now = opts.now ?? (() => new Date().toISOString());
   const policies = opts.policies ?? defaultPolicies();
 
-  // 1) State transition (pure)
-  const nextState = transitionDecisionState(decision.state, event.type);
+  // 0) Locking: once approved/rejected, no more mutation
+  if (isLockedState(decision.state)) {
+    return {
+      ok: false,
+      decision,
+      violations: [
+        {
+          code: "LOCKED_DECISION",
+          message: `Decision is locked in state ${decision.state}; cannot apply ${event.type}.`,
+          // if your PolicyViolation type includes severity, policy.ts can set it;
+          // engine defaults to BLOCK if missing
+          ...(typeof (decision as any) === "object" ? { severity: "BLOCK" } : {}),
+        } as any,
+      ],
+    };
+  }
 
-  if (nextState === decision.state && event.type !== "REJECT") {
+  // 1) Artifact-only event does not change state (but is audited + policy checked)
+  const isArtifactOnly = event.type === "ATTACH_ARTIFACTS";
+
+  // 2) Compute next state unless artifact-only
+  const nextState = isArtifactOnly
+    ? decision.state
+    : transitionDecisionState(decision.state, event.type);
+
+  if (!isArtifactOnly && nextState === decision.state && event.type !== "REJECT") {
     return {
       ok: false,
       decision,
@@ -63,37 +63,48 @@ export function applyDecisionEvent(
         {
           code: "INVALID_TRANSITION",
           message: `Event ${event.type} is not valid from state ${decision.state}.`,
-        },
+          severity: "BLOCK",
+        } as any,
       ],
     };
   }
 
-  // 2) Policies
+  // 3) Run policies (BLOCK stops; WARN passes through)
+  const warnings: PolicyViolation[] = [];
   const violations: PolicyViolation[] = [];
+
   for (const p of policies) {
     const r = p({ decision, event });
-    if (!r.ok) violations.push(...r.violations);
+    if (!r.ok) {
+      for (const v of r.violations) {
+        if (severityOf(v) === "WARN") warnings.push(v);
+        else violations.push(v);
+      }
+    }
   }
+
   if (violations.length > 0) return { ok: false, decision, violations };
 
-  // 3) Apply changes + audit
-  const nextArtifacts: Record<string, unknown> = { ...(decision.artifacts ?? {}) };
-
-  // V2 artifact hooks
-  if (event.type === "SIMULATE") {
-    if (event.simulation_snapshot_id) nextArtifacts.simulation_snapshot_id = event.simulation_snapshot_id;
-  }
-  if (event.type === "EXPLAIN") {
-    if (event.explain_tree_id) nextArtifacts.explain_tree_id = event.explain_tree_id;
-  }
-
+  // 4) Apply transition + audit entry (+ artifacts merge if needed)
   const next: Decision = {
     ...decision,
     state: event.type === "REJECT" ? "REJECTED" : nextState,
     updated_at: now(),
-    artifacts: nextArtifacts,
+
+    artifacts:
+      event.type === "ATTACH_ARTIFACTS"
+        ? {
+            ...(decision.artifacts ?? {}),
+            ...(event.artifacts ?? {}),
+            extra: {
+              ...((decision.artifacts as any)?.extra ?? {}),
+              ...((event.artifacts as any)?.extra ?? {}),
+            },
+          }
+        : decision.artifacts,
+
     history: [
-      ...(Array.isArray(decision.history) ? decision.history : []),
+      ...(decision.history ?? []),
       {
         at: now(),
         type: event.type,
@@ -104,7 +115,31 @@ export function applyDecisionEvent(
     ],
   };
 
-  return { ok: true, decision: next };
+  return { ok: true, decision: next, warnings };
 }
 
+/**
+ * Deterministic replay:
+ * Same starting decision + same events => same resulting decision (given deterministic `now`)
+ */
+export function replayDecision(
+  start: Decision,
+  events: DecisionEvent[],
+  opts: DecisionEngineOptions = {}
+): ApplyEventResult {
+  let cur: Decision = start;
+  let allWarnings: PolicyViolation[] = [];
+
+  for (const e of events) {
+    const r = applyDecisionEvent(cur, e, opts);
+    if (!r.ok) return r;
+    cur = r.decision;
+    allWarnings = [...allWarnings, ...r.warnings];
+  }
+
+  return { ok: true, decision: cur, warnings: allWarnings };
+}
+
+// Convenience creator for v2/v3 users
+export { createDecisionV2 };
 
