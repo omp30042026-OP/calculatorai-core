@@ -21,17 +21,24 @@
     "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
     "decision:fork": "tsx examples/run-decision-engine-fork.ts > /dev/null",
 
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork"
+    "decision:store": "tsx examples/run-decision-store-replay.ts > /dev/null",
+    "decision:store:sqlite": "tsx examples/run-decision-store-sqlite.ts > /dev/null",
+
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^25.0.3",
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
     "zod": "^4.2.1"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.5.0"
   }
 }
 
