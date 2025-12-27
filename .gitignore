@@ -6,3 +6,9 @@ build/
 .env
 .env.*
 coverage/
+decision-store.sqlite
+decision-store.sqlite-wal
+decision-store.sqlite-shm
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
