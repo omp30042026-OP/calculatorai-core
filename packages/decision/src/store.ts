@@ -11,8 +11,6 @@ export type DecisionEventRecord = {
   seq: number; // monotonically increasing per decision_id
   at: string; // ISO timestamp
   event: DecisionEvent;
-
-  // V3+: safe retry / dedupe (store may enforce uniqueness per decision_id)
   idempotency_key?: string | null;
 };
 
@@ -22,13 +20,6 @@ export type DecisionEventRecord = {
 export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
 
 /**
-<<<<<<< HEAD
- * DecisionStore (V5 contract)
- * - Root decision is immutable once created.
- * - Current decision is the latest materialized view after replay.
- * - Events are append-only and ordered by seq.
- */
-=======
  * Optional snapshot row (materialized state at a given seq).
  * Used to speed up replay for long event streams.
  */
@@ -39,31 +30,21 @@ export type DecisionSnapshotRecord = {
   decision: Decision;
 };
 
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 export type DecisionStore = {
-  // -------- decisions --------
-  createDecision(decision: Decision): Promise<void>; // ensures root exists (idempotent)
-  putDecision(decision: Decision): Promise<void>; // upserts current
-  getDecision(decision_id: string): Promise<Decision | null>; // current
-  getRootDecision(decision_id: string): Promise<Decision | null>; // root
+  // decisions
+  createDecision(decision: Decision): Promise<void>;
+  putDecision(decision: Decision): Promise<void>;
+  getDecision(decision_id: string): Promise<Decision | null>;
+  getRootDecision(decision_id: string): Promise<Decision | null>;
 
-  // -------- events (append-only) --------
+  // events (append-only)
   appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord>;
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
-  /**
-<<<<<<< HEAD
-   * V5: paging helper — return events with seq > after_seq (ordered ASC).
-   * If not provided, store-engine falls back to listEvents + filter.
-   */
+  // OPTIONAL: efficient delta read for snapshots (events with seq > after_seq)
   listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
 
-  // -------- optional helpers (stronger guarantees) --------
-
   /**
-   * If provided, store-engine will wrap apply in one atomic transaction.
-   * Must be safe for async callbacks (no returning Promise from better-sqlite3 transaction()).
-=======
    * Optional helper to fetch only events after a seq.
    * If not provided, store-engine will fall back to listEvents() + filter.
    */
@@ -77,20 +58,9 @@ export type DecisionStore = {
 
   /**
    * Optional helpers for stronger guarantees in store-engine.
-   * If not provided, store-engine will fall back to simpler behavior.
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
-   */
-  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
-
-  /**
-   * Best-effort optimistic locking helper.
-   * Usually returns current decision.version (or null if missing).
+   * If not provided, store-engine falls back to simpler behavior.
    */
   getCurrentVersion?(decision_id: string): Promise<number | null>;
-
-  /**
-   * Optional idempotency lookup (pair with unique index on (decision_id, idempotency_key)).
-   */
   findEventByIdempotencyKey?(
     decision_id: string,
     idempotency_key: string

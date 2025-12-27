@@ -6,11 +6,7 @@ import type { DecisionEngineOptions } from "./engine.js";
 import { replayDecision } from "./engine.js";
 import type { PolicyViolation } from "./policy.js";
 import type { DecisionEventRecord, DecisionStore } from "./store.js";
-import type {
-  DecisionSnapshotStore,
-  SnapshotPolicy,
-  SnapshotRetentionPolicy,
-} from "./snapshots.js";
+import type { DecisionSnapshotStore, SnapshotPolicy } from "./snapshots.js";
 import { shouldCreateSnapshot } from "./snapshots.js";
 
 export type StoreApplyResult =
@@ -21,7 +17,6 @@ function nowIso(opts: DecisionEngineOptions): string {
   return (opts.now ?? (() => new Date().toISOString()))();
 }
 
-<<<<<<< HEAD
 async function loadDeltaEvents(
   store: DecisionStore,
   decision_id: string,
@@ -32,7 +27,6 @@ async function loadDeltaEvents(
   return all.filter((r) => r.seq > after_seq);
 }
 
-=======
 /**
  * Store-backed apply:
  * V3 additions:
@@ -40,11 +34,9 @@ async function loadDeltaEvents(
  * - optional idempotency via idempotency_key (store may dedupe)
  * - optional atomic txn via store.runInTransaction
  *
- * Snapshot additions (read-path only):
- * - if store.getLatestSnapshot exists, replay starts from that snapshot
- * - if store.listEventsAfter exists, only reads events after snapshot seq
+ * Snapshot additions:
+ * - optional snapshotStore + snapshotPolicy for checkpointed replay
  */
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 export async function applyEventWithStore(
   store: DecisionStore,
   input: {
@@ -52,14 +44,15 @@ export async function applyEventWithStore(
     event: DecisionEvent;
     metaIfCreate?: Record<string, unknown>;
 
+    // V3: safe retries (client-supplied)
     idempotency_key?: string;
+
+    // V3: optimistic locking
     expected_current_version?: number;
 
+    // Snapshots
     snapshotStore?: DecisionSnapshotStore;
     snapshotPolicy?: SnapshotPolicy;
-
-    // ✅ V6.2: automatic retention/compaction hook
-    snapshotRetentionPolicy?: SnapshotRetentionPolicy;
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -68,7 +61,7 @@ export async function applyEventWithStore(
     : async <T>(fn: () => Promise<T>) => fn();
 
   return run(async () => {
-    // 0) optimistic lock
+    // 0) optimistic lock (best-effort; store may implement helper)
     if (typeof input.expected_current_version === "number") {
       const curVer =
         (await store.getCurrentVersion?.(input.decision_id)) ??
@@ -90,7 +83,9 @@ export async function applyEventWithStore(
             {
               code: "CONCURRENT_MODIFICATION",
               severity: "BLOCK",
-              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
+              message: `Expected version ${input.expected_current_version} but current is ${
+                curVer ?? "null"
+              }.`,
             },
           ],
         };
@@ -105,11 +100,10 @@ export async function applyEventWithStore(
         opts.now
       );
       await store.createDecision(root);
-      await store.putDecision(root);
+      await store.putDecision(root); // set as current too
     }
 
-<<<<<<< HEAD
-    // 2) latest snapshot
+    // 2) load latest snapshot (optional)
     const snapshot = input.snapshotStore
       ? await input.snapshotStore.getLatestSnapshot(input.decision_id)
       : null;
@@ -117,34 +111,7 @@ export async function applyEventWithStore(
     const baseDecision = snapshot?.decision ?? root;
     const baseSeq = snapshot?.up_to_seq ?? 0;
 
-    // 3) idempotency shortcut
-=======
-    // helper: choose replay base (snapshot if available, else root)
-    const snap = store.getLatestSnapshot
-      ? await store.getLatestSnapshot(input.decision_id)
-      : null;
-
-    const baseDecision = snap?.decision ?? root;
-    const baseSeq = snap?.seq ?? 0;
-
-    async function loadEventsAfterSeq(afterSeq: number) {
-      if (store.listEventsAfter) return store.listEventsAfter(input.decision_id, afterSeq);
-      const all = await store.listEvents(input.decision_id);
-      return all.filter((r) => r.seq > afterSeq);
-    }
-
-    async function replayFromBase(): Promise<StoreApplyResult> {
-      const recs = await loadEventsAfterSeq(baseSeq);
-      const events = recs.map((r) => r.event);
-      const rr = replayDecision(baseDecision, events, opts);
-
-      if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
-      await store.putDecision(rr.decision);
-      return { ok: true, decision: rr.decision, warnings: rr.warnings };
-    }
-
-    // 2) idempotency shortcut if store supports lookup
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
+    // 3) idempotency shortcut if store supports lookup
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
         input.decision_id,
@@ -152,17 +119,14 @@ export async function applyEventWithStore(
       );
 
       if (existing) {
-<<<<<<< HEAD
         const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
-        const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
+        const events = deltaRecs.map((r) => r.event);
+        const rr = replayDecision(baseDecision, events, opts);
+
         if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
 
         await store.putDecision(rr.decision);
         return { ok: true, decision: rr.decision, warnings: rr.warnings };
-=======
-        // Event already appended previously → just materialize from base (snapshot/root)
-        return replayFromBase();
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
       }
     }
 
@@ -173,16 +137,18 @@ export async function applyEventWithStore(
       idempotency_key: input.idempotency_key,
     });
 
-<<<<<<< HEAD
-    // 5) replay delta after snapshot
+    // 5) replay only delta after snapshot
     const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
-    const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
+    const events = deltaRecs.map((r) => r.event);
+    const rr = replayDecision(baseDecision, events, opts);
 
-    if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+    if (!rr.ok) {
+      return { ok: false, decision: rr.decision, violations: rr.violations };
+    }
 
     await store.putDecision(rr.decision);
 
-    // 6) snapshot + V6.2 retention maintenance
+    // 6) maybe create snapshot (optional)
     if (input.snapshotStore && input.snapshotPolicy) {
       const lastSeq = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]!.seq : baseSeq;
       const lastSnapSeq = snapshot?.up_to_seq ?? 0;
@@ -194,35 +160,10 @@ export async function applyEventWithStore(
           decision: rr.decision,
           created_at: nowIso(opts),
         });
-
-        // ✅ V6.2: auto-retention + prune events
-        const ret = input.snapshotRetentionPolicy;
-        if (ret) {
-          if (input.snapshotStore.pruneSnapshots && ret.keep_last_n_snapshots > 0) {
-            await input.snapshotStore.pruneSnapshots(
-              input.decision_id,
-              ret.keep_last_n_snapshots
-            );
-          }
-
-          if (
-            ret.prune_events_up_to_latest_snapshot &&
-            input.snapshotStore.pruneEventsUpToSeq
-          ) {
-            const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
-            if (latest) {
-              await input.snapshotStore.pruneEventsUpToSeq(input.decision_id, latest.up_to_seq);
-            }
-          }
-        }
       }
     }
 
     return { ok: true, decision: rr.decision, warnings: rr.warnings };
-=======
-    // 4) replay -> materialize current (from snapshot/root)
-    return replayFromBase();
->>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
   });
 }
 
