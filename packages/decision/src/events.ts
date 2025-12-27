@@ -13,12 +13,12 @@ export const ValidateEventSchema = BaseEventSchema.extend({
 
 export const SimulateEventSchema = BaseEventSchema.extend({
   type: z.literal("SIMULATE"),
-  simulation_snapshot_id: z.string().optional(), // V2 artifact hook
+  simulation_snapshot_id: z.string().optional(), // artifact hook
 });
 
 export const ExplainEventSchema = BaseEventSchema.extend({
   type: z.literal("EXPLAIN"),
-  explain_tree_id: z.string().optional(), // V2 artifact hook
+  explain_tree_id: z.string().optional(), // artifact hook
 });
 
 export const ApproveEventSchema = BaseEventSchema.extend({
@@ -30,12 +30,25 @@ export const RejectEventSchema = BaseEventSchema.extend({
   reason: z.string().optional(),
 });
 
+export const AttachArtifactsEventSchema = BaseEventSchema.extend({
+  type: z.literal("ATTACH_ARTIFACTS"),
+  artifacts: z
+    .object({
+      explain_tree_id: z.string().optional(),
+      margin_snapshot_id: z.string().optional(),
+      risk_report_id: z.string().optional(),
+      extra: z.record(z.string(), z.unknown()).optional(),
+    })
+    .optional(),
+});
+
 export const DecisionEventSchema = z.union([
   ValidateEventSchema,
   SimulateEventSchema,
   ExplainEventSchema,
   ApproveEventSchema,
   RejectEventSchema,
+  AttachArtifactsEventSchema,
 ]);
 
 export type DecisionEvent = z.infer<typeof DecisionEventSchema>;
