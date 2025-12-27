@@ -21,7 +21,9 @@
     "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
     "decision:fork": "tsx examples/run-decision-engine-fork.ts > /dev/null",
 
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork"
+    "decision:store": "tsx examples/run-decision-store-replay.ts > /dev/null",
+
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store"
   },
   "keywords": [],
   "author": "",

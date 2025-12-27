@@ -20,3 +20,7 @@ export { defaultPolicies } from "./policy.js";
 export type { DecisionEngineOptions, ApplyEventResult } from "./engine.js";
 export { applyDecisionEvent, replayDecision } from "./engine.js";
 
+export * from "./store.js";
+export * from "./in-memory-store.js";
+export * from "./store-engine.js";
+
