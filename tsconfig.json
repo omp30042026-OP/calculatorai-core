@@ -17,7 +17,7 @@
     "moduleDetection": "force",
     "skipLibCheck": true
   },
+  "include": ["packages/**/src/**/*.ts", "examples/**/*.ts"],
   "exclude": ["node_modules", "packages/examples"]
 }
-
 
