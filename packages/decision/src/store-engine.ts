@@ -21,6 +21,7 @@ function nowIso(opts: DecisionEngineOptions): string {
   return (opts.now ?? (() => new Date().toISOString()))();
 }
 
+<<<<<<< HEAD
 async function loadDeltaEvents(
   store: DecisionStore,
   decision_id: string,
@@ -31,6 +32,19 @@ async function loadDeltaEvents(
   return all.filter((r) => r.seq > after_seq);
 }
 
+=======
+/**
+ * Store-backed apply:
+ * V3 additions:
+ * - optional optimistic locking via expected_current_version
+ * - optional idempotency via idempotency_key (store may dedupe)
+ * - optional atomic txn via store.runInTransaction
+ *
+ * Snapshot additions (read-path only):
+ * - if store.getLatestSnapshot exists, replay starts from that snapshot
+ * - if store.listEventsAfter exists, only reads events after snapshot seq
+ */
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 export async function applyEventWithStore(
   store: DecisionStore,
   input: {
@@ -94,6 +108,7 @@ export async function applyEventWithStore(
       await store.putDecision(root);
     }
 
+<<<<<<< HEAD
     // 2) latest snapshot
     const snapshot = input.snapshotStore
       ? await input.snapshotStore.getLatestSnapshot(input.decision_id)
@@ -103,6 +118,33 @@ export async function applyEventWithStore(
     const baseSeq = snapshot?.up_to_seq ?? 0;
 
     // 3) idempotency shortcut
+=======
+    // helper: choose replay base (snapshot if available, else root)
+    const snap = store.getLatestSnapshot
+      ? await store.getLatestSnapshot(input.decision_id)
+      : null;
+
+    const baseDecision = snap?.decision ?? root;
+    const baseSeq = snap?.seq ?? 0;
+
+    async function loadEventsAfterSeq(afterSeq: number) {
+      if (store.listEventsAfter) return store.listEventsAfter(input.decision_id, afterSeq);
+      const all = await store.listEvents(input.decision_id);
+      return all.filter((r) => r.seq > afterSeq);
+    }
+
+    async function replayFromBase(): Promise<StoreApplyResult> {
+      const recs = await loadEventsAfterSeq(baseSeq);
+      const events = recs.map((r) => r.event);
+      const rr = replayDecision(baseDecision, events, opts);
+
+      if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+      await store.putDecision(rr.decision);
+      return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    }
+
+    // 2) idempotency shortcut if store supports lookup
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
         input.decision_id,
@@ -110,12 +152,17 @@ export async function applyEventWithStore(
       );
 
       if (existing) {
+<<<<<<< HEAD
         const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
         const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
         if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
 
         await store.putDecision(rr.decision);
         return { ok: true, decision: rr.decision, warnings: rr.warnings };
+=======
+        // Event already appended previously → just materialize from base (snapshot/root)
+        return replayFromBase();
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
       }
     }
 
@@ -126,6 +173,7 @@ export async function applyEventWithStore(
       idempotency_key: input.idempotency_key,
     });
 
+<<<<<<< HEAD
     // 5) replay delta after snapshot
     const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
     const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
@@ -171,6 +219,10 @@ export async function applyEventWithStore(
     }
 
     return { ok: true, decision: rr.decision, warnings: rr.warnings };
+=======
+    // 4) replay -> materialize current (from snapshot/root)
+    return replayFromBase();
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
   });
 }
 

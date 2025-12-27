@@ -2,8 +2,17 @@
 import Database from "better-sqlite3";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
+<<<<<<< HEAD
 import type { AppendEventInput, DecisionEventRecord, DecisionStore } from "./store.js";
 import type { DecisionSnapshot, DecisionSnapshotStore } from "./snapshots.js";
+=======
+import type {
+  AppendEventInput,
+  DecisionEventRecord,
+  DecisionSnapshotRecord,
+  DecisionStore,
+} from "./store.js";
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 
 export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore {
   private db: Database.Database;
@@ -15,10 +24,30 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     this.migrate();
   }
 
+<<<<<<< HEAD
   // ✅ Async-safe transaction wrapper (no better-sqlite3 transaction(fn) here)
   async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
     // allow nested calls safely
     if (this.txDepth > 0) return fn();
+=======
+  // ✅ IMPORTANT: better-sqlite3 transaction() cannot span async/await correctly.
+  // We implement an explicit BEGIN/COMMIT wrapper that safely surrounds awaited work.
+  async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    this.db.exec("BEGIN IMMEDIATE;");
+    try {
+      const res = await fn();
+      this.db.exec("COMMIT;");
+      return res;
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK;");
+      } catch {
+        // ignore rollback errors
+      }
+      throw e;
+    }
+  }
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 
     this.txDepth++;
     try {
@@ -61,6 +90,22 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
 
       CREATE INDEX IF NOT EXISTS idx_events_decision
         ON decision_events(decision_id, seq);
+<<<<<<< HEAD
+=======
+
+      -- ✅ Snapshots table (optional, but enables fast replay)
+      CREATE TABLE IF NOT EXISTS decision_snapshots (
+        decision_id   TEXT NOT NULL,
+        seq           INTEGER NOT NULL,
+        at            TEXT NOT NULL,
+        decision_json TEXT NOT NULL,
+        PRIMARY KEY (decision_id, seq)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_snapshots_latest
+        ON decision_snapshots(decision_id, seq DESC);
+    `);
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idem
         ON decision_events(decision_id, idempotency_key)
@@ -138,7 +183,46 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     return cur?.version ?? null;
   }
 
+<<<<<<< HEAD
   // ---------------- events ----------------
+=======
+  // ✅ Snapshot support
+  async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshotRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, decision_json
+         FROM decision_snapshots
+         WHERE decision_id = ?
+         ORDER BY seq DESC
+         LIMIT 1`
+      )
+      .get(decision_id) as
+      | { decision_id: string; seq: number; at: string; decision_json: string }
+      | undefined;
+
+    if (!row) return null;
+
+    return {
+      decision_id: row.decision_id,
+      seq: row.seq,
+      at: row.at,
+      decision: JSON.parse(row.decision_json) as Decision,
+    };
+  }
+
+  async saveSnapshot(snap: DecisionSnapshotRecord): Promise<void> {
+    this.db
+      .prepare(
+        `INSERT INTO decision_snapshots(decision_id, seq, at, decision_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(decision_id, seq)
+         DO UPDATE SET
+           at = excluded.at,
+           decision_json = excluded.decision_json`
+      )
+      .run(snap.decision_id, snap.seq, snap.at, JSON.stringify(snap.decision));
+  }
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 
   async findEventByIdempotencyKey(
     decision_id: string,
@@ -246,8 +330,13 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     }));
   }
 
+<<<<<<< HEAD
   // ✅ efficient delta fetch for snapshots
   async listEventsFrom(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
+=======
+  // ✅ Faster replay path (used by store-engine if present)
+  async listEventsAfter(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
     const rows = this.db
       .prepare(
         `SELECT decision_id, seq, at, event_json, idempotency_key
@@ -268,6 +357,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       seq: r.seq,
       at: r.at,
       event: JSON.parse(r.event_json) as DecisionEvent,
+<<<<<<< HEAD
       idempotency_key: r.idempotency_key ?? null,
     }));
   }
@@ -354,5 +444,10 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
 
     return { deleted: info.changes };
   }
+=======
+      ...(r.idempotency_key ? { idempotency_key: r.idempotency_key } : {}),
+    }));
+  }
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 }
 

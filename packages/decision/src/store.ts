@@ -22,11 +22,24 @@ export type DecisionEventRecord = {
 export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
 
 /**
+<<<<<<< HEAD
  * DecisionStore (V5 contract)
  * - Root decision is immutable once created.
  * - Current decision is the latest materialized view after replay.
  * - Events are append-only and ordered by seq.
  */
+=======
+ * Optional snapshot row (materialized state at a given seq).
+ * Used to speed up replay for long event streams.
+ */
+export type DecisionSnapshotRecord = {
+  decision_id: string;
+  seq: number; // snapshot is valid after applying events up to this seq
+  at: string; // ISO timestamp
+  decision: Decision;
+};
+
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
 export type DecisionStore = {
   // -------- decisions --------
   createDecision(decision: Decision): Promise<void>; // ensures root exists (idempotent)
@@ -39,6 +52,7 @@ export type DecisionStore = {
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
   /**
+<<<<<<< HEAD
    * V5: paging helper — return events with seq > after_seq (ordered ASC).
    * If not provided, store-engine falls back to listEvents + filter.
    */
@@ -49,6 +63,22 @@ export type DecisionStore = {
   /**
    * If provided, store-engine will wrap apply in one atomic transaction.
    * Must be safe for async callbacks (no returning Promise from better-sqlite3 transaction()).
+=======
+   * Optional helper to fetch only events after a seq.
+   * If not provided, store-engine will fall back to listEvents() + filter.
+   */
+  listEventsAfter?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
+
+  /**
+   * Optional snapshot helpers
+   */
+  getLatestSnapshot?(decision_id: string): Promise<DecisionSnapshotRecord | null>;
+  saveSnapshot?(snap: DecisionSnapshotRecord): Promise<void>;
+
+  /**
+   * Optional helpers for stronger guarantees in store-engine.
+   * If not provided, store-engine will fall back to simpler behavior.
+>>>>>>> c00ae3a (feat(store): sqlite-backed DecisionStore + store-engine wiring)
    */
   runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
 
