@@ -3,12 +3,9 @@ import type { Decision } from "./decision.js";
 
 export type DecisionSnapshot = {
   decision_id: string;
-  // last event seq included in this snapshot
-  up_to_seq: number;
-  // materialized decision at that seq
-  decision: Decision;
-  // snapshot creation time (string ISO)
-  created_at: string;
+  up_to_seq: number; // last event seq included in this snapshot
+  decision: Decision; // materialized decision at that seq
+  created_at: string; // ISO timestamp
 };
 
 export type SnapshotPolicy = {
@@ -16,17 +13,39 @@ export type SnapshotPolicy = {
   every_n_events: number;
 };
 
+/**
+ * V6: retention policy (bounded storage)
+ */
+export type SnapshotRetentionPolicy = {
+  // keep last N snapshots per decision_id (e.g. 10)
+  keep_last_n_snapshots: number;
+
+  // if true, prune events up to the latest snapshot seq after pruning snapshots
+  prune_events_up_to_latest_snapshot?: boolean;
+};
+
 export type DecisionSnapshotStore = {
   getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null>;
   putSnapshot(snapshot: DecisionSnapshot): Promise<void>;
+
+  // V6 optional maintenance hooks
+  pruneSnapshots?(
+    decision_id: string,
+    keep_last_n: number
+  ): Promise<{ deleted: number }>;
+
+  pruneEventsUpToSeq?(
+    decision_id: string,
+    up_to_seq: number
+  ): Promise<{ deleted: number }>;
 };
 
 export function shouldCreateSnapshot(
   policy: SnapshotPolicy,
-  last_event_seq: number,
+  current_seq: number,
   last_snapshot_seq: number
 ): boolean {
   if (policy.every_n_events <= 0) return false;
-  return last_event_seq - last_snapshot_seq >= policy.every_n_events;
+  return current_seq - last_snapshot_seq >= policy.every_n_events;
 }
 
