@@ -6,8 +6,12 @@ import type { DecisionEngineOptions } from "./engine.js";
 import { replayDecision } from "./engine.js";
 import type { PolicyViolation } from "./policy.js";
 import type { DecisionEventRecord, DecisionStore } from "./store.js";
-import type { DecisionSnapshotStore, SnapshotPolicy } from "./snapshots.js";
-import { shouldCreateSnapshot } from "./snapshots.js";
+import type {
+  DecisionSnapshotStore,
+  SnapshotPolicy,
+  SnapshotRetentionPolicy,
+} from "./snapshots.js";
+import { shouldCreateSnapshot, shouldPruneEventsAfterSnapshot } from "./snapshots.js";
 
 export type StoreApplyResult =
   | { ok: true; decision: Decision; warnings: PolicyViolation[] }
@@ -34,8 +38,11 @@ async function loadDeltaEvents(
  * - optional idempotency via idempotency_key (store may dedupe)
  * - optional atomic txn via store.runInTransaction
  *
- * Snapshot additions:
+ * Snapshot additions (V5):
  * - optional snapshotStore + snapshotPolicy for checkpointed replay
+ *
+ * Retention additions (V6):
+ * - optional snapshotRetentionPolicy (keep last N snapshots + prune events)
  */
 export async function applyEventWithStore(
   store: DecisionStore,
@@ -50,9 +57,12 @@ export async function applyEventWithStore(
     // V3: optimistic locking
     expected_current_version?: number;
 
-    // Snapshots
+    // V5: snapshots
     snapshotStore?: DecisionSnapshotStore;
     snapshotPolicy?: SnapshotPolicy;
+
+    // V6: retention
+    snapshotRetentionPolicy?: SnapshotRetentionPolicy;
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -83,9 +93,7 @@ export async function applyEventWithStore(
             {
               code: "CONCURRENT_MODIFICATION",
               severity: "BLOCK",
-              message: `Expected version ${input.expected_current_version} but current is ${
-                curVer ?? "null"
-              }.`,
+              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
             },
           ],
         };
@@ -149,17 +157,36 @@ export async function applyEventWithStore(
     await store.putDecision(rr.decision);
 
     // 6) maybe create snapshot (optional)
+    let createdSnapshotSeq: number | null = null;
     if (input.snapshotStore && input.snapshotPolicy) {
       const lastSeq = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]!.seq : baseSeq;
       const lastSnapSeq = snapshot?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
+        createdSnapshotSeq = lastSeq;
+
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
           up_to_seq: lastSeq,
           decision: rr.decision,
           created_at: nowIso(opts),
         });
+
+        // 7) retention (optional): prune old snapshots + optionally prune events
+        if (input.snapshotRetentionPolicy) {
+          await input.snapshotStore.pruneSnapshots?.(
+            input.decision_id,
+            input.snapshotRetentionPolicy.keep_last_n_snapshots
+          );
+
+          if (
+            shouldPruneEventsAfterSnapshot(input.snapshotRetentionPolicy) &&
+            store.pruneEventsUpTo &&
+            createdSnapshotSeq !== null
+          ) {
+            await store.pruneEventsUpTo(input.decision_id, createdSnapshotSeq);
+          }
+        }
       }
     }
 

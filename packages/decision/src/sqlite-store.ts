@@ -17,7 +17,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
 
   // ✅ Async-safe transaction wrapper (no better-sqlite3 transaction(fn) here)
   async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    // allow nested calls safely
     if (this.txDepth > 0) return fn();
 
     this.txDepth++;
@@ -29,9 +28,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     } catch (e) {
       try {
         this.db.exec("ROLLBACK;");
-      } catch {
-        // ignore rollback failures
-      }
+      } catch {}
       throw e;
     } finally {
       this.txDepth--;
@@ -82,7 +79,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   // ---------------- decisions ----------------
 
   async createDecision(decision: Decision): Promise<void> {
-    // ✅ root stored separately and never overwritten
     this.db
       .prepare(
         `
@@ -94,7 +90,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   async putDecision(decision: Decision): Promise<void> {
-    // ✅ only updates 'current'
     this.db
       .prepare(
         `
@@ -173,13 +168,11 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   async appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord> {
-    // idempotency shortcut
     if (input.idempotency_key) {
       const existing = await this.findEventByIdempotencyKey(decision_id, input.idempotency_key);
       if (existing) return existing;
     }
 
-    // next seq
     const nextSeqRow = this.db
       .prepare(
         `SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
@@ -210,7 +203,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
           rec.idempotency_key ?? null
         );
     } catch (e: any) {
-      // if unique idempotency index tripped, return existing
       if (input.idempotency_key) {
         const existing = await this.findEventByIdempotencyKey(decision_id, input.idempotency_key);
         if (existing) return existing;
@@ -246,7 +238,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     }));
   }
 
-  // ✅ efficient delta fetch for snapshots
   async listEventsFrom(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
     const rows = this.db
       .prepare(
@@ -270,6 +261,16 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       event: JSON.parse(r.event_json) as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
     }));
+  }
+
+  // V6: prune events up to a checkpoint
+  async pruneEventsUpTo(decision_id: string, up_to_seq: number): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM decision_events
+         WHERE decision_id = ? AND seq <= ?`
+      )
+      .run(decision_id, up_to_seq);
   }
 
   // ---------------- snapshots ----------------
@@ -309,6 +310,30 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
         snapshot.created_at,
         JSON.stringify(snapshot.decision)
       );
+  }
+
+  // V6: keep only the last N snapshots (by up_to_seq)
+  async pruneSnapshots(decision_id: string, keep_last_n_snapshots: number): Promise<void> {
+    if (keep_last_n_snapshots <= 0) {
+      this.db.prepare(`DELETE FROM decision_snapshots WHERE decision_id = ?`).run(decision_id);
+      return;
+    }
+
+    this.db
+      .prepare(
+        `
+        DELETE FROM decision_snapshots
+        WHERE decision_id = ?
+          AND up_to_seq NOT IN (
+            SELECT up_to_seq
+            FROM decision_snapshots
+            WHERE decision_id = ?
+            ORDER BY up_to_seq DESC
+            LIMIT ?
+          )
+      `
+      )
+      .run(decision_id, decision_id, keep_last_n_snapshots);
   }
 }
 

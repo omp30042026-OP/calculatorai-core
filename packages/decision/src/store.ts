@@ -19,17 +19,6 @@ export type DecisionEventRecord = {
  */
 export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
 
-/**
- * Optional snapshot row (materialized state at a given seq).
- * Used to speed up replay for long event streams.
- */
-export type DecisionSnapshotRecord = {
-  decision_id: string;
-  seq: number; // snapshot is valid after applying events up to this seq
-  at: string; // ISO timestamp
-  decision: Decision;
-};
-
 export type DecisionStore = {
   // decisions
   createDecision(decision: Decision): Promise<void>;
@@ -41,25 +30,22 @@ export type DecisionStore = {
   appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord>;
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
-  // OPTIONAL: efficient delta read for snapshots (events with seq > after_seq)
+  /**
+   * V5: paging helper — return events with seq > after_seq (ordered).
+   * If not provided, store-engine will fall back to listEvents + filter.
+   */
   listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
 
   /**
-   * Optional helper to fetch only events after a seq.
-   * If not provided, store-engine will fall back to listEvents() + filter.
+   * V6: retention helper — allow pruning old events safely (optional).
+   * Implementations should delete events with seq <= up_to_seq for decision_id.
    */
-  listEventsAfter?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
-
-  /**
-   * Optional snapshot helpers
-   */
-  getLatestSnapshot?(decision_id: string): Promise<DecisionSnapshotRecord | null>;
-  saveSnapshot?(snap: DecisionSnapshotRecord): Promise<void>;
+  pruneEventsUpTo?(decision_id: string, up_to_seq: number): Promise<void>;
 
   /**
    * Optional helpers for stronger guarantees in store-engine.
-   * If not provided, store-engine falls back to simpler behavior.
    */
+  runInTransaction?<T>(fn: () => Promise<T>): Promise<T>;
   getCurrentVersion?(decision_id: string): Promise<number | null>;
   findEventByIdempotencyKey?(
     decision_id: string,
