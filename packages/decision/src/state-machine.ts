@@ -1,10 +1,6 @@
-export type DecisionState =
-  | "DRAFT"
-  | "VALIDATED"
-  | "SIMULATED"
-  | "EXPLAINED"
-  | "APPROVED"
-  | "REJECTED";
+// packages/decision/src/state-machine.ts
+
+import type { DecisionState } from "./decision.js";
 
 export type DecisionEventType =
   | "VALIDATE"
@@ -12,39 +8,49 @@ export type DecisionEventType =
   | "EXPLAIN"
   | "APPROVE"
   | "REJECT"
-  | "ATTACH_ARTIFACTS";
+  | "ATTACH_ARTIFACTS"
+  | "SIGN"; // ✅ Feature 16
 
-/**
- * Pure transition function.
- * - If invalid, returns same state (engine treats it as INVALID_TRANSITION).
- * - REJECT is handled as terminal "REJECTED".
- * - ATTACH_ARTIFACTS is a no-op transition (state unchanged).
- */
 export function transitionDecisionState(
-  state: DecisionState,
-  event: DecisionEventType
+  current: DecisionState,
+  eventType: DecisionEventType
 ): DecisionState {
-  switch (event) {
-    case "VALIDATE":
-      return state === "DRAFT" ? "VALIDATED" : state;
+  // ✅ Events that should NOT change state
+  if (eventType === "ATTACH_ARTIFACTS" || eventType === "SIGN") return current;
 
-    case "SIMULATE":
-      return state === "VALIDATED" ? "SIMULATED" : state;
+  switch (current) {
+    case "DRAFT": {
+      if (eventType === "VALIDATE") return "VALIDATED";
+      return current;
+    }
 
-    case "EXPLAIN":
-      return state === "SIMULATED" ? "EXPLAINED" : state;
+    case "VALIDATED": {
+      if (eventType === "SIMULATE") return "SIMULATED";
+      if (eventType === "EXPLAIN") return "EXPLAINED";
+      if (eventType === "APPROVE") return "APPROVED";
+      if (eventType === "REJECT") return "REJECTED";
+      return current;
+    }
 
-    case "APPROVE":
-      return state === "EXPLAINED" ? "APPROVED" : state;
+    case "SIMULATED": {
+      if (eventType === "EXPLAIN") return "EXPLAINED";
+      if (eventType === "APPROVE") return "APPROVED";
+      if (eventType === "REJECT") return "REJECTED";
+      return current;
+    }
 
-    case "REJECT":
-      return "REJECTED";
+    case "EXPLAINED": {
+      if (eventType === "APPROVE") return "APPROVED";
+      if (eventType === "REJECT") return "REJECTED";
+      return current;
+    }
 
-    case "ATTACH_ARTIFACTS":
-      return state;
+    case "APPROVED":
+    case "REJECTED":
+      return current;
 
     default:
-      return state;
+      return current;
   }
 }
 

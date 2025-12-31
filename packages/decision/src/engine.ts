@@ -5,6 +5,9 @@ import type { DecisionEvent } from "./events.js";
 import type { DecisionPolicy, PolicyViolation } from "./policy.js";
 import { defaultPolicies } from "./policy.js";
 
+// ✅ Feature 14: Accountability hook
+import { applyAccountability } from "./accountability.js";
+
 export type DecisionEngineOptions = {
   policies?: DecisionPolicy[];
   now?: () => string; // ISO timestamp
@@ -82,7 +85,7 @@ export function applyDecisionEvent(
   }
 
   // 4) Apply transition + audit event
-  const next: Decision = {
+  const nextBase: Decision = {
     ...decision,
     state: event.type === "REJECT" ? "REJECTED" : nextState,
     updated_at: now(),
@@ -108,6 +111,9 @@ export function applyDecisionEvent(
       },
     ],
   };
+
+  // ✅ Feature 14: update accountability AFTER building next state
+  const next = applyAccountability(nextBase, event);
 
   return { ok: true, decision: next, warnings };
 }
@@ -177,6 +183,7 @@ export function forkDecision(
     },
   };
 
+  // createDecisionV2 already initializes accountability from meta.owner_id (if present)
   return createDecisionV2(
     {
       decision_id: input.decision_id,
@@ -191,5 +198,4 @@ export function forkDecision(
 
 // Convenience creator for v2 users
 export { createDecisionV2 };
-
 

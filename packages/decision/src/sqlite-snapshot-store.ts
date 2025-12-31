@@ -37,12 +37,33 @@ export class SqliteDecisionSnapshotStore implements DecisionSnapshotStore {
         `
       )
       .get(decision_id) as
-      | {
-          decision_id: string;
-          up_to_seq: number;
-          decision_json: string;
-          created_at: string;
-        }
+      | { decision_id: string; up_to_seq: number; decision_json: string; created_at: string }
+      | undefined;
+
+    if (!row) return null;
+
+    return {
+      decision_id: row.decision_id,
+      up_to_seq: row.up_to_seq,
+      decision: JSON.parse(row.decision_json),
+      created_at: row.created_at,
+    };
+  }
+
+  // ✅ V7
+  async getSnapshotAtOrBefore(decision_id: string, up_to_seq: number): Promise<DecisionSnapshot | null> {
+    const row = this.db
+      .prepare(
+        `
+        SELECT decision_id, up_to_seq, decision_json, created_at
+        FROM decision_snapshots
+        WHERE decision_id = ? AND up_to_seq <= ?
+        ORDER BY up_to_seq DESC
+        LIMIT 1
+        `
+      )
+      .get(decision_id, up_to_seq) as
+      | { decision_id: string; up_to_seq: number; decision_json: string; created_at: string }
       | undefined;
 
     if (!row) return null;
@@ -60,10 +81,7 @@ export class SqliteDecisionSnapshotStore implements DecisionSnapshotStore {
       .prepare(
         `
         INSERT OR IGNORE INTO decision_snapshots(
-          decision_id,
-          up_to_seq,
-          decision_json,
-          created_at
+          decision_id, up_to_seq, decision_json, created_at
         )
         VALUES (?, ?, ?, ?)
         `
@@ -76,3 +94,4 @@ export class SqliteDecisionSnapshotStore implements DecisionSnapshotStore {
       );
   }
 }
+

@@ -5,25 +5,35 @@
   "main": "index.js",
   "type": "commonjs",
   "scripts": {
-    "test": "echo \"No tests specified\"",
-    "typecheck": "tsc --noEmit",
     "explain:single": "tsx examples/run-explain-tree.ts > /dev/null",
     "explain:multi": "tsx examples/run-explain-multi.ts > /dev/null",
     "effects": "tsx examples/assert-effects.ts",
     "golden": "tsx examples/verify-golden.ts",
+
     "decision:ok": "tsx examples/run-decision-engine.ts > /dev/null",
     "decision:blocked": "tsx examples/run-decision-engine-blocked.ts > /dev/null",
     "decision:required": "tsx examples/run-decision-engine-required-fields.ts > /dev/null",
     "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
     "decision:fork": "tsx examples/run-decision-engine-fork.ts > /dev/null",
+
     "decision:store": "tsx examples/run-decision-store-replay.ts > /dev/null",
     "decision:store:sqlite": "tsx examples/run-decision-store-sqlite.ts > /dev/null",
     "decision:snapshots:sqlite": "tsx examples/run-decision-snapshots-sqlite.ts > /dev/null",
     "decision:durability:sqlite": "tsx examples/run-decision-durability-sqlite.ts > /dev/null",
     "decision:retention:sqlite": "tsx examples/run-decision-retention-sqlite.ts > /dev/null",
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite && npm run decision:snapshots:sqlite && npm run decision:durability:sqlite && npm run decision:retention:sqlite"
+    "decision:history:sqlite": "tsx examples/run-decision-history-sqlite.ts > /dev/null",
+    "decision:fork-history:sqlite": "tsx examples/run-decision-fork-history-sqlite.ts > /dev/null",
+    "decision:diff:sqlite": "tsx examples/run-decision-diff-sqlite.ts > /dev/null",
+    "decision:audit:sqlite": "tsx examples/run-decision-audit-sqlite.ts > /dev/null",
+    "decision:timeline:sqlite": "tsx examples/run-decision-timeline-sqlite.ts > /dev/null",
+    "decision:fork-graph:sqlite": "tsx examples/run-decision-fork-graph-sqlite.ts > /dev/null",
+    "decision:lineage:sqlite": "tsx examples/run-decision-lineage-sqlite.ts > /dev/null",
+    "decision:observability:sqlite": "tsx examples/run-decision-observability-sqlite.ts > /dev/null",
+
+    "typecheck": "tsc --noEmit",
+
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite && npm run decision:snapshots:sqlite && npm run decision:durability:sqlite && npm run decision:retention:sqlite && npm run decision:history:sqlite && npm run decision:fork-history:sqlite && npm run decision:diff:sqlite && npm run decision:audit:sqlite && npm run decision:timeline:sqlite && npm run decision:fork-graph:sqlite && npm run decision:lineage:sqlite && npm run decision:observability:sqlite"
   },
-  "keywords": [],
   "author": "",
   "license": "ISC",
   "devDependencies": {

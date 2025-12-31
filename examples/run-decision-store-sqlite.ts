@@ -181,25 +181,59 @@ class SqliteDecisionStore implements DecisionStore {
 
 // ---- simple in-memory snapshot store for the example ----
 class InMemorySnapshotStore implements DecisionSnapshotStore {
-  private latest = new Map<string, DecisionSnapshot>();
+  private snaps = new Map<string, DecisionSnapshot[]>();
+
+  count(decision_id: string): number {
+    return (this.snaps.get(decision_id) ?? []).length;
+  }
 
   async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
-    return this.latest.get(decision_id) ?? null;
+    const arr = this.snaps.get(decision_id) ?? [];
+    return arr.length ? arr[arr.length - 1]! : null;
   }
 
   async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
-    const cur = this.latest.get(snapshot.decision_id);
-    if (!cur || snapshot.up_to_seq >= cur.up_to_seq) {
-      this.latest.set(snapshot.decision_id, snapshot);
+    const arr = this.snaps.get(snapshot.decision_id) ?? [];
+    const idx = arr.findIndex((s) => s.up_to_seq === snapshot.up_to_seq);
+    if (idx >= 0) arr[idx] = snapshot;
+    else arr.push(snapshot);
+
+    arr.sort((a, b) => a.up_to_seq - b.up_to_seq);
+    this.snaps.set(snapshot.decision_id, arr);
+  }
+
+  async pruneSnapshots(decision_id: string, keep_last_n: number): Promise<{ deleted: number }> {
+    const arr = this.snaps.get(decision_id) ?? [];
+    if (keep_last_n <= 0) {
+      this.snaps.set(decision_id, []);
+      return { deleted: arr.length };
     }
+    if (arr.length <= keep_last_n) return { deleted: 0 };
+
+    const keep = arr.slice(-keep_last_n);
+    const deleted = arr.length - keep.length;
+    this.snaps.set(decision_id, keep);
+    return { deleted };
+  }
+
+  // in-memory snapshot store can’t prune DB events; no-op is fine for this demo
+  async pruneEventsUpToSeq(_decision_id: string, _up_to_seq: number): Promise<{ deleted: number }> {
+    return { deleted: 0 };
   }
 }
 
 // ---- demo ----
 async function main() {
-  const store = new SqliteDecisionStore(":memory:"); // ✅ clean per run (best for npm run check)
+  const store = new SqliteDecisionStore(":memory:");
   const snapshotStore = new InMemorySnapshotStore();
+
   const snapshotPolicy: SnapshotPolicy = { every_n_events: 2 };
+
+  // ✅ V6 retention policy (what you asked about)
+  const snapshotRetentionPolicy = {
+    keep_last_n_snapshots: 2,
+    prune_events_up_to_latest_snapshot: true,
+  };
 
   const now = makeDeterministicNow("2025-01-01T00:00:00.000Z");
   const opts: DecisionEngineOptions = { now };
@@ -218,6 +252,7 @@ async function main() {
       event: { type: "VALIDATE", actor_id: "system" },
       snapshotStore,
       snapshotPolicy,
+      snapshotRetentionPolicy,
     },
     opts
   );
@@ -230,32 +265,31 @@ async function main() {
       event: { type: "SIMULATE", actor_id: "system" },
       snapshotStore,
       snapshotPolicy,
+      snapshotRetentionPolicy,
     },
     opts
   );
   assert(r2.ok, "simulate failed");
 
-  const r3 = await applyEventWithStore(
-    store,
-    {
-      decision_id,
-      event: {
-        type: "ATTACH_ARTIFACTS",
-        actor_id: "system",
-        artifacts: {
-          explain_tree_id: "tree_sql_001",
-          extra: {
-            simulation_snapshot_id: "snap_sql_001",
-            note: "stored in sqlite",
-          },
+  // add some events so we create multiple snapshots + trigger retention
+  for (let i = 0; i < 8; i++) {
+    const r = await applyEventWithStore(
+      store,
+      {
+        decision_id,
+        event: {
+          type: "ATTACH_ARTIFACTS",
+          actor_id: "system",
+          artifacts: { extra: { tick: i } },
         },
+        snapshotStore,
+        snapshotPolicy,
+        snapshotRetentionPolicy,
       },
-      snapshotStore,
-      snapshotPolicy,
-    },
-    opts
-  );
-  assert(r3.ok, "attach artifacts failed");
+      opts
+    );
+    assert(r.ok, `tick ${i} failed`);
+  }
 
   const current = await store.getDecision(decision_id);
   assert(current, "missing current decision");
@@ -267,9 +301,9 @@ async function main() {
       {
         decision_id: current.decision_id,
         state: current.state,
-        artifacts: current.artifacts ?? null,
         history_len: current.history?.length ?? 0,
         snapshot_up_to_seq: snap?.up_to_seq ?? null,
+        snapshots_kept_in_memory: snapshotStore.count(decision_id), // should be <= 2
       },
       null,
       2

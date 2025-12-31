@@ -13,31 +13,18 @@ export type SnapshotPolicy = {
   every_n_events: number;
 };
 
-/**
- * V6: retention policy (bounded storage)
- */
 export type SnapshotRetentionPolicy = {
-  // keep last N snapshots per decision_id (e.g. 10)
   keep_last_n_snapshots: number;
-
-  // if true, prune events up to the latest snapshot seq after pruning snapshots
-  prune_events_up_to_latest_snapshot?: boolean;
+  prune_events_up_to_latest_snapshot: boolean;
 };
 
 export type DecisionSnapshotStore = {
   getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null>;
   putSnapshot(snapshot: DecisionSnapshot): Promise<void>;
 
-  // V6 optional maintenance hooks
-  pruneSnapshots?(
-    decision_id: string,
-    keep_last_n: number
-  ): Promise<{ deleted: number }>;
-
-  pruneEventsUpToSeq?(
-    decision_id: string,
-    up_to_seq: number
-  ): Promise<{ deleted: number }>;
+  // optional (only some stores support retention/pruning)
+  pruneSnapshots?(decision_id: string, keep_last_n: number): Promise<{ deleted: number }>;
+  pruneEventsUpToSeq?(decision_id: string, up_to_seq: number): Promise<{ deleted: number }>;
 };
 
 export function shouldCreateSnapshot(
@@ -49,3 +36,9 @@ export function shouldCreateSnapshot(
   return current_seq - last_snapshot_seq >= policy.every_n_events;
 }
 
+// ✅ store-engine imports this, so we must export it
+export function shouldPruneEventsAfterSnapshot(
+  retention?: SnapshotRetentionPolicy
+): boolean {
+  return !!retention?.prune_events_up_to_latest_snapshot;
+}

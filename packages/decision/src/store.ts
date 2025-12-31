@@ -37,10 +37,10 @@ export type DecisionStore = {
   listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
 
   /**
-   * V6: retention helper — allow pruning old events safely (optional).
-   * Implementations should delete events with seq <= up_to_seq for decision_id.
+   * V10: tail helper — return last N events (ordered ASC).
+   * Store-audit uses this to avoid full scans.
    */
-  pruneEventsUpTo?(decision_id: string, up_to_seq: number): Promise<void>;
+  listEventsTail?(decision_id: string, limit: number): Promise<DecisionEventRecord[]>;
 
   /**
    * Optional helpers for stronger guarantees in store-engine.

@@ -15,7 +15,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     this.migrate();
   }
 
-  // ✅ Async-safe transaction wrapper (no better-sqlite3 transaction(fn) here)
+  // ✅ Async-safe transaction wrapper (no better-sqlite3 transaction(fn))
   async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
     if (this.txDepth > 0) return fn();
 
@@ -28,7 +28,9 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     } catch (e) {
       try {
         this.db.exec("ROLLBACK;");
-      } catch {}
+      } catch {
+        // ignore rollback failures
+      }
       throw e;
     } finally {
       this.txDepth--;
@@ -238,6 +240,69 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     }));
   }
 
+
+  // add inside SqliteDecisionStore class
+
+    async listEventsUpTo(decision_id: string, up_to_seq: number) {
+        const rows = this.db
+        .prepare(
+        `SELECT decision_id, seq, at, event_json, idempotency_key
+        FROM decision_events
+        WHERE decision_id = ? AND seq <= ?
+        ORDER BY seq ASC`
+        )
+        .all(decision_id, up_to_seq) as Array<{
+        decision_id: string;
+        seq: number;
+        at: string;
+        event_json: string;
+        idempotency_key: string | null;
+    }>;
+
+    return rows.map((r) => ({
+        decision_id: r.decision_id,
+        seq: r.seq,
+        at: r.at,
+        event: JSON.parse(r.event_json),
+        idempotency_key: r.idempotency_key ?? null,
+    }));
+  }
+
+  // ✅ V10: efficient tail fetch (avoids scanning full history)
+  async listEventsTail(decision_id: string, limit: number): Promise<DecisionEventRecord[]> {
+    const safeLimit = Math.max(0, Math.min(limit, 500)); // guard
+    if (safeLimit === 0) return [];
+
+    // We fetch DESC then reverse to ASC to keep "natural" order for callers.
+    const rows = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, event_json, idempotency_key
+         FROM decision_events
+         WHERE decision_id = ?
+         ORDER BY seq DESC
+         LIMIT ?`
+      )
+      .all(decision_id, safeLimit) as Array<{
+      decision_id: string;
+      seq: number;
+      at: string;
+      event_json: string;
+      idempotency_key: string | null;
+    }>;
+
+    rows.reverse();
+
+    return rows.map((r) => ({
+      decision_id: r.decision_id,
+      seq: r.seq,
+      at: r.at,
+      event: JSON.parse(r.event_json),
+      idempotency_key: r.idempotency_key ?? null,
+    }));
+  }
+
+
+
   async listEventsFrom(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
     const rows = this.db
       .prepare(
@@ -261,16 +326,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       event: JSON.parse(r.event_json) as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
     }));
-  }
-
-  // V6: prune events up to a checkpoint
-  async pruneEventsUpTo(decision_id: string, up_to_seq: number): Promise<void> {
-    this.db
-      .prepare(
-        `DELETE FROM decision_events
-         WHERE decision_id = ? AND seq <= ?`
-      )
-      .run(decision_id, up_to_seq);
   }
 
   // ---------------- snapshots ----------------
@@ -312,14 +367,17 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       );
   }
 
-  // V6: keep only the last N snapshots (by up_to_seq)
-  async pruneSnapshots(decision_id: string, keep_last_n_snapshots: number): Promise<void> {
-    if (keep_last_n_snapshots <= 0) {
-      this.db.prepare(`DELETE FROM decision_snapshots WHERE decision_id = ?`).run(decision_id);
-      return;
+  // ✅ return count deleted
+  async pruneSnapshots(decision_id: string, keep_last_n: number): Promise<{ deleted: number }> {
+    if (keep_last_n <= 0) {
+      const info = this.db
+        .prepare(`DELETE FROM decision_snapshots WHERE decision_id = ?`)
+        .run(decision_id);
+      return { deleted: info.changes ?? 0 };
     }
 
-    this.db
+    // delete everything except latest N
+    const info = this.db
       .prepare(
         `
         DELETE FROM decision_snapshots
@@ -333,7 +391,23 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
           )
       `
       )
-      .run(decision_id, decision_id, keep_last_n_snapshots);
+      .run(decision_id, decision_id, keep_last_n);
+
+    return { deleted: info.changes ?? 0 };
+  }
+
+  // ✅ keep name used by examples + interface
+  async pruneEventsUpToSeq(decision_id: string, up_to_seq: number): Promise<{ deleted: number }> {
+    const info = this.db
+      .prepare(
+        `
+        DELETE FROM decision_events
+        WHERE decision_id = ? AND seq <= ?
+      `
+      )
+      .run(decision_id, up_to_seq);
+
+    return { deleted: info.changes ?? 0 };
   }
 }
 
