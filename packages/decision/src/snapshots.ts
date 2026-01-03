@@ -6,6 +6,10 @@ export type DecisionSnapshot = {
   up_to_seq: number; // last event seq included in this snapshot
   decision: Decision; // materialized decision at that seq
   created_at: string; // ISO timestamp
+
+  // ✅ Feature 19: snapshot checkpoint to the hash-chain at up_to_seq
+  // (hash of the event row with seq === up_to_seq)
+  checkpoint_hash?: string | null;
 };
 
 export type SnapshotPolicy = {
@@ -37,8 +41,7 @@ export function shouldCreateSnapshot(
 }
 
 // ✅ store-engine imports this, so we must export it
-export function shouldPruneEventsAfterSnapshot(
-  retention?: SnapshotRetentionPolicy
-): boolean {
+export function shouldPruneEventsAfterSnapshot(retention?: SnapshotRetentionPolicy): boolean {
   return !!retention?.prune_events_up_to_latest_snapshot;
 }
+

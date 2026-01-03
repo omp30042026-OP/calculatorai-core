@@ -52,19 +52,28 @@ export function applyDecisionEvent(
     ? decision.state
     : transitionDecisionState(decision.state, event.type);
 
-  if (!isArtifactOnly && nextState === decision.state && event.type !== "REJECT") {
+  // Allow idempotent "same-state" replays/retries.
+    // This is important for snapshot delta replay and safe retries.
+    const IDEMPOTENT_SAME_STATE = new Set(["VALIDATE", "SIMULATE", "EXPLAIN"]);
+
+    if (
+    !isArtifactOnly &&
+    nextState === decision.state &&
+    event.type !== "REJECT" &&
+    !IDEMPOTENT_SAME_STATE.has(event.type as string)
+    ) {
     return {
-      ok: false,
-      decision,
-      violations: [
+        ok: false,
+        decision,
+        violations: [
         {
-          code: "INVALID_TRANSITION",
-          severity: "BLOCK",
-          message: `Event ${event.type} is not valid from state ${decision.state}.`,
+            code: "INVALID_TRANSITION",
+            severity: "BLOCK",
+            message: `Event ${event.type} is not valid from state ${decision.state}.`,
         },
-      ],
+        ],
     };
-  }
+    }
 
   // 3) Run policies (BLOCK stops; WARN passes through)
   const warnings: PolicyViolation[] = [];

@@ -5,6 +5,10 @@ import type { DecisionEvent } from "./events.js";
 /**
  * One persisted event row.
  * `idempotency_key` is optional but strongly recommended for safe retries.
+ *
+ * ✅ Feature 17: Tamper-evident audit trail (hash-chain)
+ * - prev_hash: hash of previous event in the chain (or null for first)
+ * - hash: hash of this event row (includes prev_hash)
  */
 export type DecisionEventRecord = {
   decision_id: string;
@@ -12,12 +16,22 @@ export type DecisionEventRecord = {
   at: string; // ISO timestamp
   event: DecisionEvent;
   idempotency_key?: string | null;
+
+  // ✅ Feature 17 (optional for backwards compatibility)
+  prev_hash?: string | null;
+  hash?: string | null;
 };
 
 /**
  * Input for appending a new event (store assigns decision_id + seq).
+ *
+ * ✅ Feature 17:
+ * - caller does NOT provide hashes; store computes them.
  */
-export type AppendEventInput = Omit<DecisionEventRecord, "decision_id" | "seq">;
+export type AppendEventInput = Omit<
+  DecisionEventRecord,
+  "decision_id" | "seq" | "prev_hash" | "hash"
+>;
 
 export type DecisionStore = {
   // decisions
@@ -41,6 +55,13 @@ export type DecisionStore = {
    * Store-audit uses this to avoid full scans.
    */
   listEventsTail?(decision_id: string, limit: number): Promise<DecisionEventRecord[]>;
+
+  /**
+   * ✅ Feature 17 (optional):
+   * Fast read for the last event hash to avoid scanning.
+   * Store implementations can use it when computing next hashes.
+   */
+  getLastEvent?(decision_id: string): Promise<DecisionEventRecord | null>;
 
   /**
    * Optional helpers for stronger guarantees in store-engine.

@@ -44,3 +44,8 @@ export * from "./store-timeline.js";
 export * from "./store-lineage.js";
 export * from "./store-fork-graph.js";
 
+export { verifyDecisionHashChain } from "./store-verify.js";
+export type { VerifyHashChainOptions, VerifyHashChainResult } from "./store-verify.js";
+
+export { verifyDecisionFromSnapshot } from "./store-verify.js";
+export type { VerifyFromSnapshotResult } from "./store-verify.js";

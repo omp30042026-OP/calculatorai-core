@@ -1,117 +1,222 @@
 // packages/decision/src/sqlite-store.ts
 import Database from "better-sqlite3";
+import crypto from "node:crypto";
+
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
 import type { AppendEventInput, DecisionEventRecord, DecisionStore } from "./store.js";
 import type { DecisionSnapshot, DecisionSnapshotStore } from "./snapshots.js";
 
+// ---------------------------------
+// Feature 17: hash-chain utilities
+// ---------------------------------
+function stableStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+
+  const norm = (v: any): any => {
+    if (v === null) return null;
+    if (typeof v !== "object") return v;
+
+    if (seen.has(v)) return "[Circular]";
+    seen.add(v);
+
+    if (Array.isArray(v)) return v.map(norm);
+
+    const out: Record<string, any> = {};
+    for (const k of Object.keys(v).sort()) {
+      const vv = v[k];
+      if (typeof vv === "undefined") continue; // keep JSON-like behavior
+      out[k] = norm(vv);
+    }
+    return out;
+  };
+
+  return JSON.stringify(norm(value));
+}
+
+function sha256Hex(s: string): string {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+function computeEventHash(input: {
+  decision_id: string;
+  seq: number;
+  at: string;
+  idempotency_key?: string | null;
+  event: DecisionEvent;
+  prev_hash?: string | null;
+}): string {
+  const payload = stableStringify({
+    decision_id: input.decision_id,
+    seq: input.seq,
+    at: input.at,
+    idempotency_key: input.idempotency_key ?? null,
+    event: input.event,
+    prev_hash: input.prev_hash ?? null,
+  });
+
+  return sha256Hex(payload);
+}
+
+// ---------------------------------
+// Store
+// ---------------------------------
 export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore {
   private db: Database.Database;
-  private txDepth = 0;
 
-  constructor(filename = "decision-store.sqlite") {
+  constructor(filename: string) {
     this.db = new Database(filename);
     this.db.pragma("journal_mode = WAL");
-    this.migrate();
+    this.db.pragma("foreign_keys = ON");
+    this.init();
   }
 
-  // ✅ Async-safe transaction wrapper (no better-sqlite3 transaction(fn))
-  async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
-    if (this.txDepth > 0) return fn();
+  private init() {
+    // decisions
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decisions (
+        decision_id TEXT PRIMARY KEY,
+        root_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        decision_json TEXT NOT NULL
+      );
+    `);
 
-    this.txDepth++;
+    // events (append-only)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decision_events (
+        decision_id TEXT NOT NULL,
+        seq INTEGER NOT NULL,
+        at TEXT NOT NULL,
+        event_json TEXT NOT NULL,
+        idempotency_key TEXT,
+
+        -- ✅ Feature 17
+        prev_hash TEXT,
+        hash TEXT,
+
+        PRIMARY KEY (decision_id, seq)
+      );
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_decision_events_decision_seq
+      ON decision_events (decision_id, seq);
+    `);
+
+    // ✅ idempotency must be UNIQUE (and only when key is present)
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_events_idempotency_unique
+      ON decision_events (decision_id, idempotency_key)
+      WHERE idempotency_key IS NOT NULL;
+    `);
+
+    // snapshots (Feature 19 adds checkpoint_hash column)
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS decision_snapshots (
+        decision_id TEXT NOT NULL,
+        snapshot_id TEXT NOT NULL,
+        at TEXT NOT NULL,
+        up_to_seq INTEGER NOT NULL,
+        snapshot_json TEXT NOT NULL,
+        checkpoint_hash TEXT,
+        PRIMARY KEY (decision_id, snapshot_id)
+      );
+    `);
+
+    this.db.exec(`
+      CREATE INDEX IF NOT EXISTS idx_decision_snapshots_decision_seq
+      ON decision_snapshots (decision_id, up_to_seq);
+    `);
+
+    // ---- migrations for older DBs ----
+    this.ensureColumn("decision_events", "prev_hash", "TEXT");
+    this.ensureColumn("decision_events", "hash", "TEXT");
+    this.ensureColumn("decision_snapshots", "checkpoint_hash", "TEXT");
+  }
+
+  private ensureColumn(table: string, column: string, type: string) {
+    const rows = this.db.prepare(`PRAGMA table_info(${table});`).all() as Array<{ name: string }>;
+    const has = rows.some((r) => r.name === column);
+    if (!has) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`);
+  }
+
+  // -----------------------------
+  // Optional transactional helper
+  // - supports async
+  // - supports nesting via SAVEPOINT
+  // -----------------------------
+  private _sp = 0;
+
+  async runInTransaction<T>(fn: () => Promise<T>): Promise<T> {
+    const inTx = (this.db as any).inTransaction === true;
+
+    if (!inTx) {
+      this.db.exec("BEGIN");
+      try {
+        const out = await fn();
+        this.db.exec("COMMIT");
+        return out;
+      } catch (e) {
+        try {
+          this.db.exec("ROLLBACK");
+        } catch {
+          // ignore rollback error
+        }
+        throw e;
+      }
+    }
+
+    // Nested: use SAVEPOINT
+    const sp = `sp_${++this._sp}`;
+    this.db.exec(`SAVEPOINT ${sp}`);
     try {
-      this.db.exec("BEGIN IMMEDIATE;");
       const out = await fn();
-      this.db.exec("COMMIT;");
+      this.db.exec(`RELEASE SAVEPOINT ${sp}`);
       return out;
     } catch (e) {
       try {
-        this.db.exec("ROLLBACK;");
+        this.db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
+        this.db.exec(`RELEASE SAVEPOINT ${sp}`);
       } catch {
-        // ignore rollback failures
+        // ignore rollback errors
       }
       throw e;
-    } finally {
-      this.txDepth--;
     }
   }
 
-  private migrate() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS decisions (
-        decision_id   TEXT NOT NULL,
-        kind          TEXT NOT NULL, -- 'root' | 'current'
-        decision_json TEXT NOT NULL,
-        PRIMARY KEY (decision_id, kind)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_decisions_kind
-        ON decisions(decision_id, kind);
-
-      CREATE TABLE IF NOT EXISTS decision_events (
-        decision_id      TEXT NOT NULL,
-        seq              INTEGER NOT NULL,
-        at               TEXT NOT NULL,
-        event_json       TEXT NOT NULL,
-        idempotency_key  TEXT,
-        PRIMARY KEY (decision_id, seq)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_events_decision
-        ON decision_events(decision_id, seq);
-
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_events_idem
-        ON decision_events(decision_id, idempotency_key)
-        WHERE idempotency_key IS NOT NULL;
-
-      CREATE TABLE IF NOT EXISTS decision_snapshots (
-        decision_id   TEXT NOT NULL,
-        up_to_seq     INTEGER NOT NULL,
-        created_at    TEXT NOT NULL,
-        decision_json TEXT NOT NULL,
-        PRIMARY KEY (decision_id, up_to_seq)
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_snapshots_latest
-        ON decision_snapshots(decision_id, up_to_seq DESC);
-    `);
-  }
-
-  // ---------------- decisions ----------------
-
+  // -----------------------------
+  // decisions
+  // -----------------------------
   async createDecision(decision: Decision): Promise<void> {
+    const root_id = decision.parent_decision_id ?? decision.decision_id;
+
     this.db
       .prepare(
-        `
-        INSERT OR IGNORE INTO decisions(decision_id, kind, decision_json)
-        VALUES (?, 'root', ?)
-      `
+        `INSERT OR IGNORE INTO decisions (decision_id, root_id, version, decision_json)
+         VALUES (?, ?, ?, ?);`
       )
-      .run(decision.decision_id, JSON.stringify(decision));
+      .run(decision.decision_id, root_id, decision.version ?? 1, JSON.stringify(decision));
   }
 
   async putDecision(decision: Decision): Promise<void> {
+    const root_id = decision.parent_decision_id ?? decision.decision_id;
+
     this.db
       .prepare(
-        `
-        INSERT INTO decisions(decision_id, kind, decision_json)
-        VALUES (?, 'current', ?)
-        ON CONFLICT(decision_id, kind)
-        DO UPDATE SET decision_json = excluded.decision_json
-      `
+        `INSERT INTO decisions (decision_id, root_id, version, decision_json)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(decision_id) DO UPDATE SET
+           root_id=excluded.root_id,
+           version=excluded.version,
+           decision_json=excluded.decision_json;`
       )
-      .run(decision.decision_id, JSON.stringify(decision));
+      .run(decision.decision_id, root_id, decision.version ?? 1, JSON.stringify(decision));
   }
 
   async getDecision(decision_id: string): Promise<Decision | null> {
     const row = this.db
-      .prepare(
-        `SELECT decision_json
-         FROM decisions
-         WHERE decision_id = ? AND kind = 'current'
-         LIMIT 1`
-      )
+      .prepare(`SELECT decision_json FROM decisions WHERE decision_id=?;`)
       .get(decision_id) as { decision_json: string } | undefined;
 
     return row ? (JSON.parse(row.decision_json) as Decision) : null;
@@ -119,42 +224,147 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
 
   async getRootDecision(decision_id: string): Promise<Decision | null> {
     const row = this.db
-      .prepare(
-        `SELECT decision_json
-         FROM decisions
-         WHERE decision_id = ? AND kind = 'root'
-         LIMIT 1`
-      )
-      .get(decision_id) as { decision_json: string } | undefined;
+      .prepare(`SELECT root_id FROM decisions WHERE decision_id=?;`)
+      .get(decision_id) as { root_id: string } | undefined;
 
-    return row ? (JSON.parse(row.decision_json) as Decision) : null;
+    const root_id = row?.root_id ?? decision_id;
+    return this.getDecision(root_id);
   }
 
   async getCurrentVersion(decision_id: string): Promise<number | null> {
-    const cur = await this.getDecision(decision_id);
-    return cur?.version ?? null;
+    const row = this.db
+      .prepare(`SELECT version FROM decisions WHERE decision_id=?;`)
+      .get(decision_id) as { version: number } | undefined;
+
+    return row ? row.version : null;
   }
 
-  // ---------------- events ----------------
-
-  async findEventByIdempotencyKey(
-    decision_id: string,
-    key: string
-  ): Promise<DecisionEventRecord | null> {
+  // -----------------------------
+  // ✅ Feature 19 helper: hash at a specific seq
+  // -----------------------------
+  private getEventHashAtSeq(decision_id: string, seq: number): string | null {
     const row = this.db
       .prepare(
-        `SELECT decision_id, seq, at, event_json, idempotency_key
+        `SELECT hash
          FROM decision_events
-         WHERE decision_id = ? AND idempotency_key = ?
-         LIMIT 1`
+         WHERE decision_id=? AND seq=?
+         LIMIT 1;`
       )
-      .get(decision_id, key) as
+      .get(decision_id, seq) as { hash: string | null } | undefined;
+
+    return row?.hash ?? null;
+  }
+
+  // -----------------------------
+  // snapshots (DecisionSnapshotStore)
+  // -----------------------------
+  async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
+    const snapAny = snapshot as any;
+
+    const decision_id: string = snapAny.decision_id;
+    const up_to_seq: number = snapAny.up_to_seq;
+
+    // Your snapshot type uses created_at, but table uses at
+    const at: string =
+      typeof snapAny.created_at === "string" && snapAny.created_at.length
+        ? snapAny.created_at
+        : new Date().toISOString();
+
+    const snapshot_id: string =
+      typeof snapAny.snapshot_id === "string" && snapAny.snapshot_id.trim().length
+        ? snapAny.snapshot_id
+        : `${decision_id}@${up_to_seq}`;
+
+    // ✅ Feature 19: auto-fill checkpoint_hash if missing
+    const checkpoint_hash: string | null =
+      typeof snapAny.checkpoint_hash === "string"
+        ? snapAny.checkpoint_hash
+        : up_to_seq > 0
+          ? this.getEventHashAtSeq(decision_id, up_to_seq)
+          : null;
+
+    const snapshot_json = JSON.stringify({
+      ...snapAny,
+      snapshot_id,
+      created_at: at,
+      checkpoint_hash,
+    });
+
+    this.db
+      .prepare(
+        `INSERT INTO decision_snapshots (decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(decision_id, snapshot_id) DO UPDATE SET
+           at=excluded.at,
+           up_to_seq=excluded.up_to_seq,
+           snapshot_json=excluded.snapshot_json,
+           checkpoint_hash=excluded.checkpoint_hash;`
+      )
+      .run(decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash);
+  }
+
+  async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
+    const row = this.db
+      .prepare(
+        `SELECT snapshot_json
+         FROM decision_snapshots
+         WHERE decision_id=?
+         ORDER BY up_to_seq DESC
+         LIMIT 1;`
+      )
+      .get(decision_id) as { snapshot_json: string } | undefined;
+
+    return row ? (JSON.parse(row.snapshot_json) as DecisionSnapshot) : null;
+  }
+
+  async pruneSnapshots(decision_id: string, keep_last_n: number): Promise<{ deleted: number }> {
+    const n = Math.max(0, Math.floor(keep_last_n));
+
+    if (n === 0) {
+      const info = this.db.prepare(`DELETE FROM decision_snapshots WHERE decision_id=?;`).run(decision_id);
+      return { deleted: Number(info.changes ?? 0) };
+    }
+
+    const info = this.db
+      .prepare(
+        `
+        DELETE FROM decision_snapshots
+        WHERE decision_id=?
+          AND snapshot_id NOT IN (
+            SELECT snapshot_id
+            FROM decision_snapshots
+            WHERE decision_id=?
+            ORDER BY up_to_seq DESC
+            LIMIT ?
+          );
+        `
+      )
+      .run(decision_id, decision_id, n);
+
+    return { deleted: Number(info.changes ?? 0) };
+  }
+
+  // -----------------------------
+  // events
+  // -----------------------------
+  async getLastEvent(decision_id: string): Promise<DecisionEventRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
+         FROM decision_events
+         WHERE decision_id=?
+         ORDER BY seq DESC
+         LIMIT 1;`
+      )
+      .get(decision_id) as
       | {
           decision_id: string;
           seq: number;
           at: string;
           event_json: string;
           idempotency_key: string | null;
+          prev_hash: string | null;
+          hash: string | null;
         }
       | undefined;
 
@@ -166,62 +376,69 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       at: row.at,
       event: JSON.parse(row.event_json) as DecisionEvent,
       idempotency_key: row.idempotency_key ?? null,
+      prev_hash: row.prev_hash ?? null,
+      hash: row.hash ?? null,
     };
   }
 
   async appendEvent(decision_id: string, input: AppendEventInput): Promise<DecisionEventRecord> {
-    if (input.idempotency_key) {
-      const existing = await this.findEventByIdempotencyKey(decision_id, input.idempotency_key);
-      if (existing) return existing;
-    }
+    return this.runInTransaction(async () => {
+      const event: DecisionEvent = input.event;
+      const at = input.at;
+      const idempotency_key = input.idempotency_key ?? null;
 
-    const nextSeqRow = this.db
-      .prepare(
-        `SELECT COALESCE(MAX(seq), 0) + 1 AS next_seq
-         FROM decision_events
-         WHERE decision_id = ?`
-      )
-      .get(decision_id) as { next_seq: number };
-
-    const rec: DecisionEventRecord = {
-      decision_id,
-      seq: nextSeqRow.next_seq,
-      at: input.at,
-      event: input.event,
-      idempotency_key: input.idempotency_key ?? null,
-    };
-
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO decision_events(decision_id, seq, at, event_json, idempotency_key)
-           VALUES (?, ?, ?, ?, ?)`
-        )
-        .run(
-          rec.decision_id,
-          rec.seq,
-          rec.at,
-          JSON.stringify(rec.event),
-          rec.idempotency_key ?? null
-        );
-    } catch (e: any) {
-      if (input.idempotency_key) {
-        const existing = await this.findEventByIdempotencyKey(decision_id, input.idempotency_key);
+      // ✅ idempotency: if this key already exists, return that row (safe retry)
+      if (idempotency_key) {
+        const existing = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
         if (existing) return existing;
       }
-      throw e;
-    }
 
-    return rec;
+      // next seq (safe inside transaction)
+      const row = this.db
+        .prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_events WHERE decision_id=?;`)
+        .get(decision_id) as { max_seq: number };
+
+      const seq = (row?.max_seq ?? 0) + 1;
+
+      const last = await this.getLastEvent(decision_id);
+      const prev_hash = last?.hash ?? null;
+
+      const hash = computeEventHash({
+        decision_id,
+        seq,
+        at,
+        idempotency_key,
+        event,
+        prev_hash,
+      });
+
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO decision_events
+              (decision_id, seq, at, event_json, idempotency_key, prev_hash, hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?);`
+          )
+          .run(decision_id, seq, at, JSON.stringify(event), idempotency_key, prev_hash, hash);
+      } catch (e: any) {
+        if (idempotency_key && String(e?.message ?? "").includes("UNIQUE")) {
+          const existing2 = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
+          if (existing2) return existing2;
+        }
+        throw e;
+      }
+
+      return { decision_id, seq, at, event, idempotency_key, prev_hash, hash };
+    });
   }
 
   async listEvents(decision_id: string): Promise<DecisionEventRecord[]> {
     const rows = this.db
       .prepare(
-        `SELECT decision_id, seq, at, event_json, idempotency_key
+        `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
          FROM decision_events
-         WHERE decision_id = ?
-         ORDER BY seq ASC`
+         WHERE decision_id=?
+         ORDER BY seq ASC;`
       )
       .all(decision_id) as Array<{
       decision_id: string;
@@ -229,6 +446,8 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       at: string;
       event_json: string;
       idempotency_key: string | null;
+      prev_hash: string | null;
+      hash: string | null;
     }>;
 
     return rows.map((r) => ({
@@ -237,79 +456,18 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       at: r.at,
       event: JSON.parse(r.event_json) as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
+      prev_hash: r.prev_hash ?? null,
+      hash: r.hash ?? null,
     }));
   }
-
-
-  // add inside SqliteDecisionStore class
-
-    async listEventsUpTo(decision_id: string, up_to_seq: number) {
-        const rows = this.db
-        .prepare(
-        `SELECT decision_id, seq, at, event_json, idempotency_key
-        FROM decision_events
-        WHERE decision_id = ? AND seq <= ?
-        ORDER BY seq ASC`
-        )
-        .all(decision_id, up_to_seq) as Array<{
-        decision_id: string;
-        seq: number;
-        at: string;
-        event_json: string;
-        idempotency_key: string | null;
-    }>;
-
-    return rows.map((r) => ({
-        decision_id: r.decision_id,
-        seq: r.seq,
-        at: r.at,
-        event: JSON.parse(r.event_json),
-        idempotency_key: r.idempotency_key ?? null,
-    }));
-  }
-
-  // ✅ V10: efficient tail fetch (avoids scanning full history)
-  async listEventsTail(decision_id: string, limit: number): Promise<DecisionEventRecord[]> {
-    const safeLimit = Math.max(0, Math.min(limit, 500)); // guard
-    if (safeLimit === 0) return [];
-
-    // We fetch DESC then reverse to ASC to keep "natural" order for callers.
-    const rows = this.db
-      .prepare(
-        `SELECT decision_id, seq, at, event_json, idempotency_key
-         FROM decision_events
-         WHERE decision_id = ?
-         ORDER BY seq DESC
-         LIMIT ?`
-      )
-      .all(decision_id, safeLimit) as Array<{
-      decision_id: string;
-      seq: number;
-      at: string;
-      event_json: string;
-      idempotency_key: string | null;
-    }>;
-
-    rows.reverse();
-
-    return rows.map((r) => ({
-      decision_id: r.decision_id,
-      seq: r.seq,
-      at: r.at,
-      event: JSON.parse(r.event_json),
-      idempotency_key: r.idempotency_key ?? null,
-    }));
-  }
-
-
 
   async listEventsFrom(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]> {
     const rows = this.db
       .prepare(
-        `SELECT decision_id, seq, at, event_json, idempotency_key
+        `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
          FROM decision_events
-         WHERE decision_id = ? AND seq > ?
-         ORDER BY seq ASC`
+         WHERE decision_id=? AND seq > ?
+         ORDER BY seq ASC;`
       )
       .all(decision_id, after_seq) as Array<{
       decision_id: string;
@@ -317,6 +475,8 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       at: string;
       event_json: string;
       idempotency_key: string | null;
+      prev_hash: string | null;
+      hash: string | null;
     }>;
 
     return rows.map((r) => ({
@@ -325,89 +485,87 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       at: r.at,
       event: JSON.parse(r.event_json) as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
+      prev_hash: r.prev_hash ?? null,
+      hash: r.hash ?? null,
     }));
   }
 
-  // ---------------- snapshots ----------------
+  async listEventsTail(decision_id: string, limit: number): Promise<DecisionEventRecord[]> {
+    if (limit <= 0) return [];
 
-  async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
+    const rows = this.db
+      .prepare(
+        `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
+         FROM decision_events
+         WHERE decision_id=?
+         ORDER BY seq DESC
+         LIMIT ?;`
+      )
+      .all(decision_id, limit) as Array<{
+      decision_id: string;
+      seq: number;
+      at: string;
+      event_json: string;
+      idempotency_key: string | null;
+      prev_hash: string | null;
+      hash: string | null;
+    }>;
+
+    return rows
+      .map((r) => ({
+        decision_id: r.decision_id,
+        seq: r.seq,
+        at: r.at,
+        event: JSON.parse(r.event_json) as DecisionEvent,
+        idempotency_key: r.idempotency_key ?? null,
+        prev_hash: r.prev_hash ?? null,
+        hash: r.hash ?? null,
+      }))
+      .reverse();
+  }
+
+  async findEventByIdempotencyKey(
+    decision_id: string,
+    idempotency_key: string
+  ): Promise<DecisionEventRecord | null> {
     const row = this.db
       .prepare(
-        `SELECT decision_id, up_to_seq, created_at, decision_json
-         FROM decision_snapshots
-         WHERE decision_id = ?
-         ORDER BY up_to_seq DESC
-         LIMIT 1`
+        `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
+         FROM decision_events
+         WHERE decision_id=? AND idempotency_key=?
+         ORDER BY seq ASC
+         LIMIT 1;`
       )
-      .get(decision_id) as
-      | { decision_id: string; up_to_seq: number; created_at: string; decision_json: string }
+      .get(decision_id, idempotency_key) as
+      | {
+          decision_id: string;
+          seq: number;
+          at: string;
+          event_json: string;
+          idempotency_key: string | null;
+          prev_hash: string | null;
+          hash: string | null;
+        }
       | undefined;
 
     if (!row) return null;
 
     return {
       decision_id: row.decision_id,
-      up_to_seq: row.up_to_seq,
-      created_at: row.created_at,
-      decision: JSON.parse(row.decision_json) as Decision,
+      seq: row.seq,
+      at: row.at,
+      event: JSON.parse(row.event_json) as DecisionEvent,
+      idempotency_key: row.idempotency_key ?? null,
+      prev_hash: row.prev_hash ?? null,
+      hash: row.hash ?? null,
     };
   }
 
-  async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
-    this.db
-      .prepare(
-        `INSERT OR REPLACE INTO decision_snapshots(decision_id, up_to_seq, created_at, decision_json)
-         VALUES (?, ?, ?, ?)`
-      )
-      .run(
-        snapshot.decision_id,
-        snapshot.up_to_seq,
-        snapshot.created_at,
-        JSON.stringify(snapshot.decision)
-      );
-  }
-
-  // ✅ return count deleted
-  async pruneSnapshots(decision_id: string, keep_last_n: number): Promise<{ deleted: number }> {
-    if (keep_last_n <= 0) {
-      const info = this.db
-        .prepare(`DELETE FROM decision_snapshots WHERE decision_id = ?`)
-        .run(decision_id);
-      return { deleted: info.changes ?? 0 };
-    }
-
-    // delete everything except latest N
-    const info = this.db
-      .prepare(
-        `
-        DELETE FROM decision_snapshots
-        WHERE decision_id = ?
-          AND up_to_seq NOT IN (
-            SELECT up_to_seq
-            FROM decision_snapshots
-            WHERE decision_id = ?
-            ORDER BY up_to_seq DESC
-            LIMIT ?
-          )
-      `
-      )
-      .run(decision_id, decision_id, keep_last_n);
-
-    return { deleted: info.changes ?? 0 };
-  }
-
-  // ✅ keep name used by examples + interface
   async pruneEventsUpToSeq(decision_id: string, up_to_seq: number): Promise<{ deleted: number }> {
     const info = this.db
-      .prepare(
-        `
-        DELETE FROM decision_events
-        WHERE decision_id = ? AND seq <= ?
-      `
-      )
+      .prepare(`DELETE FROM decision_events WHERE decision_id=? AND seq <= ?;`)
       .run(decision_id, up_to_seq);
-
-    return { deleted: info.changes ?? 0 };
+    return { deleted: Number(info.changes ?? 0) };
   }
 }
 
