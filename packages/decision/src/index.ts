@@ -49,3 +49,6 @@ export type { VerifyHashChainOptions, VerifyHashChainResult } from "./store-veri
 
 export { verifyDecisionFromSnapshot } from "./store-verify.js";
 export type { VerifyFromSnapshotResult } from "./store-verify.js";
+
+export { verifyForkLineage } from "./store-verify-lineage.js";
+export type { VerifyForkLineageResult, VerifyForkLineageOptions } from "./store-verify-lineage.js";

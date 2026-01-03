@@ -140,11 +140,17 @@ export async function applyEventWithStore(
       const lastSnapSeq = snapshot?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
+        // ✅ Feature 18: store checkpoint_hash if the store provides event hashes
+        const lastRec = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]! : null;
+        const checkpoint_hash =
+          (lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null);
+
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
           up_to_seq: lastSeq,
           decision: rr.decision,
           created_at: nowIso(opts),
+          checkpoint_hash,
         });
 
         // retention pass (all optional)

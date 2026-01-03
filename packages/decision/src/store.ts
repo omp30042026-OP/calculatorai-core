@@ -7,8 +7,6 @@ import type { DecisionEvent } from "./events.js";
  * `idempotency_key` is optional but strongly recommended for safe retries.
  *
  * ✅ Feature 17: Tamper-evident audit trail (hash-chain)
- * - prev_hash: hash of previous event in the chain (or null for first)
- * - hash: hash of this event row (includes prev_hash)
  */
 export type DecisionEventRecord = {
   decision_id: string;
@@ -51,6 +49,14 @@ export type DecisionStore = {
   listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
 
   /**
+   * ✅ Feature 19 + ✅ Feature 20:
+   * Fast read for a single event by seq.
+   * - Feature 19: snapshot checkpoint verification (hash at up_to_seq)
+   * - Feature 20: fork lineage verification (parent hash at fork seq)
+   */
+  getEventBySeq?(decision_id: string, seq: number): Promise<DecisionEventRecord | null>;
+
+  /**
    * V10: tail helper — return last N events (ordered ASC).
    * Store-audit uses this to avoid full scans.
    */
@@ -59,7 +65,6 @@ export type DecisionStore = {
   /**
    * ✅ Feature 17 (optional):
    * Fast read for the last event hash to avoid scanning.
-   * Store implementations can use it when computing next hashes.
    */
   getLastEvent?(decision_id: string): Promise<DecisionEventRecord | null>;
 
