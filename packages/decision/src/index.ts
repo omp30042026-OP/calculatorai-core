@@ -52,3 +52,6 @@ export type { VerifyFromSnapshotResult } from "./store-verify.js";
 
 export { verifyForkLineage } from "./store-verify-lineage.js";
 export type { VerifyForkLineageResult, VerifyForkLineageOptions } from "./store-verify-lineage.js";
+
+export { verifyDecisionRootFromSnapshot } from "./store-verify-root.js";
+export type { VerifyRootFromSnapshotResult } from "./store-verify-root.js";

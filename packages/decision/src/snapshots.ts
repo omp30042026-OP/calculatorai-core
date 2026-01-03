@@ -2,6 +2,11 @@
 import type { Decision } from "./decision.js";
 
 /**
+ * Hex-encoded SHA-256 hash.
+ */
+export type HexHash = string;
+
+/**
  * A materialized snapshot of a decision at a specific event sequence.
  */
 export type DecisionSnapshot = {
@@ -31,7 +36,19 @@ export type DecisionSnapshot = {
    * - O(delta) verification from snapshot
    * - Snapshot ↔ event-chain integrity guarantees
    */
-  checkpoint_hash?: string | null;
+  checkpoint_hash?: HexHash | null;
+
+  /**
+   * ✅ Feature 21 — Decision Merkle Root
+   *
+   * Merkle root over event hashes [1..up_to_seq] (in seq order).
+   * Compact integrity fingerprint of the whole history at this checkpoint.
+   *
+   * Notes:
+   * - null if up_to_seq <= 0
+   * - null if any hashes are missing (cannot compute)
+   */
+  root_hash?: HexHash | null;
 };
 
 /**
@@ -87,7 +104,9 @@ export function shouldCreateSnapshot(
   current_seq: number,
   last_snapshot_seq: number
 ): boolean {
+  if (!Number.isFinite(policy.every_n_events)) return false;
   if (policy.every_n_events <= 0) return false;
+  if (current_seq <= 0) return false;
   return current_seq - last_snapshot_seq >= policy.every_n_events;
 }
 

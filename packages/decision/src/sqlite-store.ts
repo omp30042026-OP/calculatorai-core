@@ -1,4 +1,3 @@
-// packages/decision/src/sqlite-store.ts
 import Database from "better-sqlite3";
 import crypto from "node:crypto";
 
@@ -25,7 +24,7 @@ function stableStringify(value: unknown): string {
     const out: Record<string, any> = {};
     for (const k of Object.keys(v).sort()) {
       const vv = v[k];
-      if (typeof vv === "undefined") continue; // keep JSON-like behavior
+      if (typeof vv === "undefined") continue;
       out[k] = norm(vv);
     }
     return out;
@@ -56,6 +55,27 @@ function computeEventHash(input: {
   });
 
   return sha256Hex(payload);
+}
+
+// ---------------------------------
+// Feature 21: Merkle root of hashes
+// - If any leaf hash is missing -> null (cannot compute)
+// ---------------------------------
+function merkleRootHex(leaves: Array<string | null>): string | null {
+  if (leaves.length === 0) return null;
+  if (leaves.some((h) => !h)) return null;
+
+  let level = leaves as string[];
+  while (level.length > 1) {
+    const next: string[] = [];
+    for (let i = 0; i < level.length; i += 2) {
+      const left = level[i]!;
+      const right = level[i + 1] ?? left; // duplicate last if odd
+      next.push(sha256Hex(`${left}:${right}`));
+    }
+    level = next;
+  }
+  return level[0] ?? null;
 }
 
 // ---------------------------------
@@ -90,11 +110,8 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
         at TEXT NOT NULL,
         event_json TEXT NOT NULL,
         idempotency_key TEXT,
-
-        -- ✅ Feature 17
         prev_hash TEXT,
         hash TEXT,
-
         PRIMARY KEY (decision_id, seq)
       );
     `);
@@ -104,14 +121,13 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       ON decision_events (decision_id, seq);
     `);
 
-    // ✅ idempotency must be UNIQUE (and only when key is present)
     this.db.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_events_idempotency_unique
       ON decision_events (decision_id, idempotency_key)
       WHERE idempotency_key IS NOT NULL;
     `);
 
-    // snapshots (Feature 18/19 adds checkpoint_hash column)
+    // snapshots (Feature 18/19 checkpoint_hash, Feature 21 root_hash)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decision_snapshots (
         decision_id TEXT NOT NULL,
@@ -120,6 +136,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
         up_to_seq INTEGER NOT NULL,
         snapshot_json TEXT NOT NULL,
         checkpoint_hash TEXT,
+        root_hash TEXT,
         PRIMARY KEY (decision_id, snapshot_id)
       );
     `);
@@ -133,6 +150,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     this.ensureColumn("decision_events", "prev_hash", "TEXT");
     this.ensureColumn("decision_events", "hash", "TEXT");
     this.ensureColumn("decision_snapshots", "checkpoint_hash", "TEXT");
+    this.ensureColumn("decision_snapshots", "root_hash", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, type: string) {
@@ -142,9 +160,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   // -----------------------------
-  // Optional transactional helper
-  // - supports async
-  // - supports nesting via SAVEPOINT
+  // Optional transactional helper (async + nested)
   // -----------------------------
   private _sp = 0;
 
@@ -160,14 +176,11 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       } catch (e) {
         try {
           this.db.exec("ROLLBACK");
-        } catch {
-          // ignore rollback error
-        }
+        } catch {}
         throw e;
       }
     }
 
-    // Nested: use SAVEPOINT
     const sp = `sp_${++this._sp}`;
     this.db.exec(`SAVEPOINT ${sp}`);
     try {
@@ -178,9 +191,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       try {
         this.db.exec(`ROLLBACK TO SAVEPOINT ${sp}`);
         this.db.exec(`RELEASE SAVEPOINT ${sp}`);
-      } catch {
-        // ignore rollback errors
-      }
+      } catch {}
       throw e;
     }
   }
@@ -240,23 +251,39 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   // -----------------------------
-  // Feature 19 helper: hash at a specific seq
+  // Feature 19 helper: hash at seq
   // -----------------------------
   private getEventHashAtSeq(decision_id: string, seq: number): string | null {
     const row = this.db
-      .prepare(
-        `SELECT hash
-         FROM decision_events
-         WHERE decision_id=? AND seq=?
-         LIMIT 1;`
-      )
+      .prepare(`SELECT hash FROM decision_events WHERE decision_id=? AND seq=? LIMIT 1;`)
       .get(decision_id, seq) as { hash: string | null } | undefined;
 
     return row?.hash ?? null;
   }
 
   // -----------------------------
-  // snapshots (DecisionSnapshotStore)
+  // Feature 21 helper: hashes [1..up_to_seq] with gap detection
+  // -----------------------------
+  private listEventHashesUpToSeq(decision_id: string, up_to_seq: number): Array<string | null> {
+    if (up_to_seq <= 0) return [];
+
+    const rows = this.db
+      .prepare(
+        `SELECT seq, hash
+         FROM decision_events
+         WHERE decision_id=? AND seq BETWEEN 1 AND ?
+         ORDER BY seq ASC;`
+      )
+      .all(decision_id, up_to_seq) as Array<{ seq: number; hash: string | null }>;
+
+    // Fill exact positions; if any missing seq/hash => null and Merkle root becomes null.
+    const out: Array<string | null> = new Array(up_to_seq).fill(null);
+    for (const r of rows) out[r.seq - 1] = r.hash ?? null;
+    return out;
+  }
+
+  // -----------------------------
+  // snapshots
   // -----------------------------
   async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
     const snapAny = snapshot as any;
@@ -264,7 +291,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     const decision_id: string = snapAny.decision_id;
     const up_to_seq: number = snapAny.up_to_seq;
 
-    // Snapshot type uses created_at, table uses at
     const at: string =
       typeof snapAny.created_at === "string" && snapAny.created_at.length
         ? snapAny.created_at
@@ -275,7 +301,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
         ? snapAny.snapshot_id
         : `${decision_id}@${up_to_seq}`;
 
-    // ✅ Feature 18/19: auto-fill checkpoint_hash if missing
+    // Feature 18/19: checkpoint hash
     const checkpoint_hash: string | null =
       typeof snapAny.checkpoint_hash === "string"
         ? snapAny.checkpoint_hash
@@ -283,24 +309,35 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
           ? this.getEventHashAtSeq(decision_id, up_to_seq)
           : null;
 
+    // Feature 21: root hash (null if up_to_seq<=0 OR missing hashes)
+    const root_hash: string | null =
+      typeof snapAny.root_hash === "string"
+        ? snapAny.root_hash
+        : up_to_seq > 0
+          ? merkleRootHex(this.listEventHashesUpToSeq(decision_id, up_to_seq))
+          : null;
+
     const snapshot_json = JSON.stringify({
       ...snapAny,
       snapshot_id,
       created_at: at,
       checkpoint_hash,
+      root_hash,
     });
 
     this.db
       .prepare(
-        `INSERT INTO decision_snapshots (decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash)
-         VALUES (?, ?, ?, ?, ?, ?)
+        `INSERT INTO decision_snapshots
+           (decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash, root_hash)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(decision_id, snapshot_id) DO UPDATE SET
            at=excluded.at,
            up_to_seq=excluded.up_to_seq,
            snapshot_json=excluded.snapshot_json,
-           checkpoint_hash=excluded.checkpoint_hash;`
+           checkpoint_hash=excluded.checkpoint_hash,
+           root_hash=excluded.root_hash;`
       )
-      .run(decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash);
+      .run(decision_id, snapshot_id, at, up_to_seq, snapshot_json, checkpoint_hash, root_hash);
   }
 
   async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
@@ -321,9 +358,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     const n = Math.max(0, Math.floor(keep_last_n));
 
     if (n === 0) {
-      const info = this.db
-        .prepare(`DELETE FROM decision_snapshots WHERE decision_id=?;`)
-        .run(decision_id);
+      const info = this.db.prepare(`DELETE FROM decision_snapshots WHERE decision_id=?;`).run(decision_id);
       return { deleted: Number(info.changes ?? 0) };
     }
 
@@ -389,13 +424,11 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       const at = input.at;
       const idempotency_key = input.idempotency_key ?? null;
 
-      // ✅ idempotency: if this key already exists, return that row (safe retry)
       if (idempotency_key) {
         const existing = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
         if (existing) return existing;
       }
 
-      // next seq (safe inside transaction)
       const row = this.db
         .prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_events WHERE decision_id=?;`)
         .get(decision_id) as { max_seq: number };
@@ -423,7 +456,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
           )
           .run(decision_id, seq, at, JSON.stringify(event), idempotency_key, prev_hash, hash);
       } catch (e: any) {
-        // if the unique idempotency index hit due to a race, re-read and return
         if (idempotency_key && String(e?.message ?? "").includes("UNIQUE")) {
           const existing2 = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
           if (existing2) return existing2;
@@ -527,10 +559,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       .reverse();
   }
 
-  async findEventByIdempotencyKey(
-    decision_id: string,
-    idempotency_key: string
-  ): Promise<DecisionEventRecord | null> {
+  async findEventByIdempotencyKey(decision_id: string, idempotency_key: string): Promise<DecisionEventRecord | null> {
     const row = this.db
       .prepare(
         `SELECT decision_id, seq, at, event_json, idempotency_key, prev_hash, hash
@@ -565,13 +594,11 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   async pruneEventsUpToSeq(decision_id: string, up_to_seq: number): Promise<{ deleted: number }> {
-    const info = this.db
-      .prepare(`DELETE FROM decision_events WHERE decision_id=? AND seq <= ?;`)
-      .run(decision_id, up_to_seq);
+    const info = this.db.prepare(`DELETE FROM decision_events WHERE decision_id=? AND seq <= ?;`).run(decision_id, up_to_seq);
     return { deleted: Number(info.changes ?? 0) };
   }
 
-  // ✅ Feature 19/20: random access to an event by seq (keep only ONE implementation)
+  // Feature 19/20: random access by seq
   async getEventBySeq(decision_id: string, seq: number): Promise<DecisionEventRecord | null> {
     const row = this.db
       .prepare(
