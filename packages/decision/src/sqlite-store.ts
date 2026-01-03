@@ -6,6 +6,9 @@ import type { DecisionEvent } from "./events.js";
 import type { AppendEventInput, DecisionEventRecord, DecisionStore } from "./store.js";
 import type { DecisionSnapshot, DecisionSnapshotStore } from "./snapshots.js";
 
+import type { MerkleProof } from "./store.js";
+import { buildMerkleProofFromLeaves } from "./merkle-proof.js";
+
 // ---------------------------------
 // Feature 17: hash-chain utilities
 // ---------------------------------
@@ -631,5 +634,58 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       hash: row.hash ?? null,
     };
   }
+
+
+    // -----------------------------
+  // Feature 23 helper: event hashes 1..up_to_seq (must be complete, no gaps)
+  // Returns null if missing any hashes or any seq missing in [1..up_to_seq]
+  // -----------------------------
+  private listCompleteEventHashesUpToSeq(decision_id: string, up_to_seq: number): string[] | null {
+    if (up_to_seq <= 0) return [];
+
+    const rows = this.db
+      .prepare(
+        `SELECT seq, hash
+         FROM decision_events
+         WHERE decision_id=? AND seq <= ?
+         ORDER BY seq ASC;`
+      )
+      .all(decision_id, up_to_seq) as Array<{ seq: number; hash: string | null }>;
+
+    if (rows.length !== up_to_seq) return null; // gap or missing rows
+
+    const out: string[] = [];
+    for (let i = 0; i < rows.length; i++) {
+      const expectedSeq = i + 1;
+      const r = rows[i]!;
+      if (r.seq !== expectedSeq) return null; // non-contiguous
+      if (!r.hash) return null; // missing hash
+      out.push(r.hash);
+    }
+    return out;
+  }
+
+    // -----------------------------
+  // ✅ Feature 23: Merkle inclusion proof for an event at seq
+  // -----------------------------
+  async getMerkleProof(decision_id: string, seq: number, up_to_seq: number): Promise<MerkleProof | null> {
+    const upto = Math.floor(up_to_seq);
+    const s = Math.floor(seq);
+
+    if (upto <= 0) return null;
+    if (s <= 0 || s > upto) return null;
+
+    const leaves = this.listCompleteEventHashesUpToSeq(decision_id, upto);
+    if (!leaves) return null;
+
+    return buildMerkleProofFromLeaves({
+      decision_id,
+      up_to_seq: upto,
+      seq: s,
+      leaves,
+    });
+  }
+
 }
+
 

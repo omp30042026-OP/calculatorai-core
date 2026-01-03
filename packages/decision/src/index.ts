@@ -55,3 +55,11 @@ export type { VerifyForkLineageResult, VerifyForkLineageOptions } from "./store-
 
 export { verifyDecisionRootFromSnapshot } from "./store-verify-root.js";
 export type { VerifyRootFromSnapshotResult } from "./store-verify-root.js";
+
+// packages/decision/src/index.ts
+export { buildMerkleProofFromLeaves, verifyMerkleProof } from "./merkle-proof.js";
+export type { VerifyMerkleProofResult } from "./merkle-proof.js";
+
+export { verifyEventIncludedFromLatestSnapshot } from "./store-verify-inclusion.js";
+export type { VerifyInclusionResult } from "./store-verify-inclusion.js";
+

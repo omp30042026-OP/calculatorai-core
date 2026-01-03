@@ -31,6 +31,24 @@ export type AppendEventInput = Omit<
   "decision_id" | "seq" | "prev_hash" | "hash"
 >;
 
+/**
+ * ✅ Feature 23: Merkle inclusion proof for a single event hash.
+ *
+ * siblings are ordered bottom-up (leaf -> root).
+ */
+export type MerkleProofStep = {
+  hash: string;
+  position: "left" | "right";
+};
+
+export type MerkleProof = {
+  decision_id: string;
+  up_to_seq: number;
+  seq: number;
+  leaf_hash: string;
+  siblings: MerkleProofStep[];
+};
+
 export type DecisionStore = {
   // decisions
   createDecision(decision: Decision): Promise<void>;
@@ -49,10 +67,8 @@ export type DecisionStore = {
   listEventsFrom?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
 
   /**
-   * ✅ Feature 19 + ✅ Feature 20:
-   * Fast read for a single event by seq.
-   * - Feature 19: snapshot checkpoint verification (hash at up_to_seq)
-   * - Feature 20: fork lineage verification (parent hash at fork seq)
+   * ✅ Feature 19/20:
+   * Fast read for a single event by seq (used for verification & proofs).
    */
   getEventBySeq?(decision_id: string, seq: number): Promise<DecisionEventRecord | null>;
 
@@ -67,6 +83,13 @@ export type DecisionStore = {
    * Fast read for the last event hash to avoid scanning.
    */
   getLastEvent?(decision_id: string): Promise<DecisionEventRecord | null>;
+
+  /**
+   * ✅ Feature 23:
+   * Build an inclusion proof for event at `seq`, proving membership in
+   * the history up to `up_to_seq` (usually snapshot.up_to_seq).
+   */
+  getMerkleProof?(decision_id: string, seq: number, up_to_seq: number): Promise<MerkleProof | null>;
 
   /**
    * Optional helpers for stronger guarantees in store-engine.
