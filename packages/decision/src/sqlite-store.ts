@@ -1,12 +1,12 @@
+// packages/decision/src/sqlite-store.ts
 import Database from "better-sqlite3";
 import crypto from "node:crypto";
 
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
-import type { AppendEventInput, DecisionEventRecord, DecisionStore } from "./store.js";
+import type { AppendEventInput, DecisionEventRecord, DecisionStore, MerkleProof } from "./store.js";
 import type { DecisionSnapshot, DecisionSnapshotStore } from "./snapshots.js";
 
-import type { MerkleProof } from "./store.js";
 import { buildMerkleProofFromLeaves } from "./merkle-proof.js";
 
 import type { AppendAnchorInput, DecisionAnchorRecord, DecisionAnchorStore } from "./anchors.js";
@@ -76,7 +76,7 @@ function merkleRootHex(leaves: Array<string | null>): string | null {
     const next: string[] = [];
     for (let i = 0; i < level.length; i += 2) {
       const left = level[i]!;
-      const right = level[i + 1] ?? left; // duplicate last if odd
+      const right = level[i + 1] ?? left;
       next.push(sha256Hex(`${left}:${right}`));
     }
     level = next;
@@ -87,7 +87,9 @@ function merkleRootHex(leaves: Array<string | null>): string | null {
 // ---------------------------------
 // Store
 // ---------------------------------
-export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore, DecisionAnchorStore {
+export class SqliteDecisionStore
+  implements DecisionStore, DecisionSnapshotStore, DecisionAnchorStore
+{
   private db: Database.Database;
 
   constructor(filename: string) {
@@ -133,7 +135,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       WHERE idempotency_key IS NOT NULL;
     `);
 
-    // snapshots (Feature 18/19 checkpoint_hash, Feature 21 root_hash)
+    // snapshots
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decision_snapshots (
         decision_id TEXT NOT NULL,
@@ -152,8 +154,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       ON decision_snapshots (decision_id, up_to_seq);
     `);
 
-
-        // ✅ Feature 25: global anchors (append-only)
+    // anchors (append-only logically, but retention will delete older rows)
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decision_anchors (
         seq INTEGER PRIMARY KEY,
@@ -172,10 +173,11 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       ON decision_anchors (decision_id, snapshot_up_to_seq);
     `);
 
-    this.ensureColumn("decision_anchors", "checkpoint_hash", "TEXT");
-    this.ensureColumn("decision_anchors", "root_hash", "TEXT");
-    this.ensureColumn("decision_anchors", "prev_hash", "TEXT");
-    this.ensureColumn("decision_anchors", "hash", "TEXT");
+    // ✅ Feature 27: prevent duplicate anchor per snapshot
+    this.db.exec(`
+      CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_anchors_unique_snapshot
+      ON decision_anchors (decision_id, snapshot_up_to_seq);
+    `);
 
     // ---- migrations for older DBs ----
     this.ensureColumn("decision_events", "prev_hash", "TEXT");
@@ -183,13 +185,10 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     this.ensureColumn("decision_snapshots", "checkpoint_hash", "TEXT");
     this.ensureColumn("decision_snapshots", "root_hash", "TEXT");
 
-    // ✅ Feature 26: prevent duplicate anchors for same snapshot checkpoint
-    this.db.exec(`
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_anchors_unique_checkpoint
-    ON decision_anchors (decision_id, snapshot_up_to_seq);
-    `);
-
-
+    this.ensureColumn("decision_anchors", "checkpoint_hash", "TEXT");
+    this.ensureColumn("decision_anchors", "root_hash", "TEXT");
+    this.ensureColumn("decision_anchors", "prev_hash", "TEXT");
+    this.ensureColumn("decision_anchors", "hash", "TEXT");
   }
 
   private ensureColumn(table: string, column: string, type: string) {
@@ -315,7 +314,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       )
       .all(decision_id, up_to_seq) as Array<{ seq: number; hash: string | null }>;
 
-    // Fill exact positions; if any missing seq/hash => null and Merkle root becomes null.
     const out: Array<string | null> = new Array(up_to_seq).fill(null);
     for (const r of rows) out[r.seq - 1] = r.hash ?? null;
     return out;
@@ -340,7 +338,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
         ? snapAny.snapshot_id
         : `${decision_id}@${up_to_seq}`;
 
-    // Feature 18/19: checkpoint hash
     const checkpoint_hash: string | null =
       typeof snapAny.checkpoint_hash === "string"
         ? snapAny.checkpoint_hash
@@ -348,7 +345,6 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
           ? this.getEventHashAtSeq(decision_id, up_to_seq)
           : null;
 
-    // Feature 21: root hash (null if up_to_seq<=0 OR missing hashes)
     const root_hash: string | null =
       typeof snapAny.root_hash === "string"
         ? snapAny.root_hash
@@ -463,7 +459,7 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       const at = input.at;
       const idempotency_key = input.idempotency_key ?? null;
 
-      if (idempotency_key) {
+      if (idempotency_key && this.findEventByIdempotencyKey) {
         const existing = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
         if (existing) return existing;
       }
@@ -633,11 +629,12 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
   }
 
   async pruneEventsUpToSeq(decision_id: string, up_to_seq: number): Promise<{ deleted: number }> {
-    const info = this.db.prepare(`DELETE FROM decision_events WHERE decision_id=? AND seq <= ?;`).run(decision_id, up_to_seq);
+    const info = this.db
+      .prepare(`DELETE FROM decision_events WHERE decision_id=? AND seq <= ?;`)
+      .run(decision_id, up_to_seq);
     return { deleted: Number(info.changes ?? 0) };
   }
 
-  // Feature 19/20: random access by seq
   async getEventBySeq(decision_id: string, seq: number): Promise<DecisionEventRecord | null> {
     const row = this.db
       .prepare(
@@ -671,10 +668,8 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     };
   }
 
-
-    // -----------------------------
-  // Feature 23 helper: event hashes 1..up_to_seq (must be complete, no gaps)
-  // Returns null if missing any hashes or any seq missing in [1..up_to_seq]
+  // -----------------------------
+  // Feature 23 helper: complete hashes 1..up_to_seq
   // -----------------------------
   private listCompleteEventHashesUpToSeq(decision_id: string, up_to_seq: number): string[] | null {
     if (up_to_seq <= 0) return [];
@@ -688,22 +683,19 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
       )
       .all(decision_id, up_to_seq) as Array<{ seq: number; hash: string | null }>;
 
-    if (rows.length !== up_to_seq) return null; // gap or missing rows
+    if (rows.length !== up_to_seq) return null;
 
     const out: string[] = [];
     for (let i = 0; i < rows.length; i++) {
       const expectedSeq = i + 1;
       const r = rows[i]!;
-      if (r.seq !== expectedSeq) return null; // non-contiguous
-      if (!r.hash) return null; // missing hash
+      if (r.seq !== expectedSeq) return null;
+      if (!r.hash) return null;
       out.push(r.hash);
     }
     return out;
   }
 
-    // -----------------------------
-  // ✅ Feature 23: Merkle inclusion proof for an event at seq
-  // -----------------------------
   async getMerkleProof(decision_id: string, seq: number, up_to_seq: number): Promise<MerkleProof | null> {
     const upto = Math.floor(up_to_seq);
     const s = Math.floor(seq);
@@ -722,8 +714,8 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     });
   }
 
-    // -----------------------------
-  // ✅ Feature 25: anchors (DecisionAnchorStore)
+  // -----------------------------
+  // Anchors (Feature 25/26/27)
   // -----------------------------
   async getLastAnchor(): Promise<DecisionAnchorRecord | null> {
     const row = this.db
@@ -760,73 +752,120 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     };
   }
 
-  async appendAnchor(input: AppendAnchorInput): Promise<DecisionAnchorRecord> {
-  return this.runInTransaction(async () => {
-    const at = input.at;
-    const decision_id = input.decision_id;
-    const snapshot_up_to_seq = input.snapshot_up_to_seq;
-
-    // ✅ Feature 26: if already exists, return it (idempotent)
-    const existing = await this.findAnchorByCheckpoint(decision_id, snapshot_up_to_seq);
-    if (existing) return existing;
-
+  // ✅ Feature 27 canonical helper
+  async getAnchorForSnapshot(
+    decision_id: string,
+    snapshot_up_to_seq: number
+  ): Promise<DecisionAnchorRecord | null> {
     const row = this.db
-      .prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_anchors;`)
-      .get() as { max_seq: number };
+      .prepare(
+        `SELECT seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash, prev_hash, hash
+         FROM decision_anchors
+         WHERE decision_id=? AND snapshot_up_to_seq=?
+         LIMIT 1;`
+      )
+      .get(decision_id, snapshot_up_to_seq) as
+      | {
+          seq: number;
+          at: string;
+          decision_id: string;
+          snapshot_up_to_seq: number;
+          checkpoint_hash: string | null;
+          root_hash: string | null;
+          prev_hash: string | null;
+          hash: string | null;
+        }
+      | undefined;
 
-    const seq = (row?.max_seq ?? 0) + 1;
-
-    const last = await this.getLastAnchor();
-    const prev_hash = last?.hash ?? null;
-
-    const hash = computeAnchorHash({
-      seq,
-      at,
-      decision_id,
-      snapshot_up_to_seq,
-      checkpoint_hash: input.checkpoint_hash ?? null,
-      root_hash: input.root_hash ?? null,
-      prev_hash,
-    });
-
-    try {
-      this.db
-        .prepare(
-          `INSERT INTO decision_anchors
-            (seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash, prev_hash, hash)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
-        )
-        .run(
-          seq,
-          at,
-          decision_id,
-          snapshot_up_to_seq,
-          input.checkpoint_hash ?? null,
-          input.root_hash ?? null,
-          prev_hash,
-          hash
-        );
-    } catch (e: any) {
-      // UNIQUE checkpoint index hit (race) => read and return
-      if (String(e?.message ?? "").includes("UNIQUE")) {
-        const existing2 = await this.findAnchorByCheckpoint(decision_id, snapshot_up_to_seq);
-        if (existing2) return existing2;
-      }
-      throw e;
-    }
+    if (!row) return null;
 
     return {
-      seq,
-      at,
-      decision_id,
-      snapshot_up_to_seq,
-      checkpoint_hash: input.checkpoint_hash ?? null,
-      root_hash: input.root_hash ?? null,
-      prev_hash,
-      hash,
+      seq: row.seq,
+      at: row.at,
+      decision_id: row.decision_id,
+      snapshot_up_to_seq: row.snapshot_up_to_seq,
+      checkpoint_hash: row.checkpoint_hash ?? null,
+      root_hash: row.root_hash ?? null,
+      prev_hash: row.prev_hash ?? null,
+      hash: row.hash ?? null,
     };
-  });
- }
+  }
+
+  // keep your old name too (optional compatibility)
+  async findAnchorByCheckpoint(
+    decision_id: string,
+    snapshot_up_to_seq: number
+  ): Promise<DecisionAnchorRecord | null> {
+    return this.getAnchorForSnapshot(decision_id, snapshot_up_to_seq);
+  }
+
+  async appendAnchor(input: AppendAnchorInput): Promise<DecisionAnchorRecord> {
+    return this.runInTransaction(async () => {
+      const at = input.at;
+      const decision_id = input.decision_id;
+      const snapshot_up_to_seq = input.snapshot_up_to_seq;
+
+      // ✅ Feature 27: idempotent
+      const existing = await this.getAnchorForSnapshot(decision_id, snapshot_up_to_seq);
+      if (existing) return existing;
+
+      const row = this.db
+        .prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_anchors;`)
+        .get() as { max_seq: number };
+
+      const seq = (row?.max_seq ?? 0) + 1;
+
+      const last = await this.getLastAnchor();
+      const prev_hash = last?.hash ?? null;
+
+      const hash = computeAnchorHash({
+        seq,
+        at,
+        decision_id,
+        snapshot_up_to_seq,
+        checkpoint_hash: input.checkpoint_hash ?? null,
+        root_hash: input.root_hash ?? null,
+        prev_hash,
+      });
+
+      try {
+        this.db
+          .prepare(
+            `INSERT INTO decision_anchors
+              (seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash, prev_hash, hash)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?);`
+          )
+          .run(
+            seq,
+            at,
+            decision_id,
+            snapshot_up_to_seq,
+            input.checkpoint_hash ?? null,
+            input.root_hash ?? null,
+            prev_hash,
+            hash
+          );
+      } catch (e: any) {
+        // UNIQUE (decision_id, snapshot_up_to_seq) race → read and return
+        if (String(e?.message ?? "").includes("UNIQUE")) {
+          const existing2 = await this.getAnchorForSnapshot(decision_id, snapshot_up_to_seq);
+          if (existing2) return existing2;
+        }
+        throw e;
+      }
+
+      return {
+        seq,
+        at,
+        decision_id,
+        snapshot_up_to_seq,
+        checkpoint_hash: input.checkpoint_hash ?? null,
+        root_hash: input.root_hash ?? null,
+        prev_hash,
+        hash,
+      };
+    });
+  }
 
   async listAnchors(): Promise<DecisionAnchorRecord[]> {
     const rows = this.db
@@ -858,123 +897,80 @@ export class SqliteDecisionStore implements DecisionStore, DecisionSnapshotStore
     }));
   }
 
-  // ✅ Feature 26: find anchor by (decision_id, snapshot_up_to_seq)
-    async findAnchorByCheckpoint(
-  decision_id: string,
-  snapshot_up_to_seq: number
- ): Promise<DecisionAnchorRecord | null> {
-  const row = this.db
-    .prepare(
-      `SELECT seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash, prev_hash, hash
-       FROM decision_anchors
-       WHERE decision_id=? AND snapshot_up_to_seq=?
-       LIMIT 1;`
-    )
-    .get(decision_id, snapshot_up_to_seq) as
-    | {
-        seq: number;
-        at: string;
-        decision_id: string;
-        snapshot_up_to_seq: number;
-        checkpoint_hash: string | null;
-        root_hash: string | null;
-        prev_hash: string | null;
-        hash: string | null;
-      }
-    | undefined;
-
-  if (!row) return null;
-
-  return {
-    seq: row.seq,
-    at: row.at,
-    decision_id: row.decision_id,
-    snapshot_up_to_seq: row.snapshot_up_to_seq,
-    checkpoint_hash: row.checkpoint_hash ?? null,
-    root_hash: row.root_hash ?? null,
-    prev_hash: row.prev_hash ?? null,
-    hash: row.hash ?? null,
-  };
- }
-
-
-
- private rechainAnchors(): void {
-  const rows = this.db
-    .prepare(
-      `SELECT seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash
-       FROM decision_anchors
-       ORDER BY seq ASC;`
-    )
-    .all() as Array<{
-    seq: number;
-    at: string;
-    decision_id: string;
-    snapshot_up_to_seq: number;
-    checkpoint_hash: string | null;
-    root_hash: string | null;
-  }>;
-
-  let prev_hash: string | null = null;
-
-  const upd = this.db.prepare(
-    `UPDATE decision_anchors SET prev_hash=?, hash=? WHERE seq=?;`
-  );
-
-  for (const r of rows) {
-    const hash = computeAnchorHash({
-      seq: r.seq,
-      at: r.at,
-      decision_id: r.decision_id,
-      snapshot_up_to_seq: r.snapshot_up_to_seq,
-      checkpoint_hash: r.checkpoint_hash ?? null,
-      root_hash: r.root_hash ?? null,
-      prev_hash,
-    });
-
-    upd.run(prev_hash, hash, r.seq);
-    prev_hash = hash;
-  }
- }
-
-
- async pruneAnchors(keep_last_n: number): Promise<{ deleted: number; remaining: number }> {
-  return this.runInTransaction(async () => {
-    const n = Math.max(0, Math.floor(keep_last_n));
-
-    const beforeRow = this.db.prepare(`SELECT COUNT(*) AS c FROM decision_anchors;`).get() as { c: number };
-    const before = Number(beforeRow?.c ?? 0);
-
-    if (n === 0) {
-      const info = this.db.prepare(`DELETE FROM decision_anchors;`).run();
-      return { deleted: Number(info.changes ?? 0), remaining: 0 };
-    }
-
-    // delete everything except last N by seq
-    const info = this.db
+  // Re-chain remaining anchors after retention deletes old ones
+  private rechainAnchors(): void {
+    const rows = this.db
       .prepare(
-        `
-        DELETE FROM decision_anchors
-        WHERE seq NOT IN (
-          SELECT seq
-          FROM decision_anchors
-          ORDER BY seq DESC
-          LIMIT ?
-        );
-        `
+        `SELECT seq, at, decision_id, snapshot_up_to_seq, checkpoint_hash, root_hash
+         FROM decision_anchors
+         ORDER BY seq ASC;`
       )
-      .run(n);
+      .all() as Array<{
+      seq: number;
+      at: string;
+      decision_id: string;
+      snapshot_up_to_seq: number;
+      checkpoint_hash: string | null;
+      root_hash: string | null;
+    }>;
 
-    // ✅ critical: re-chain remaining anchors so verification starts clean
-    this.rechainAnchors();
+    let prev_hash: string | null = null;
 
-    const afterRow = this.db.prepare(`SELECT COUNT(*) AS c FROM decision_anchors;`).get() as { c: number };
-    const after = Number(afterRow?.c ?? 0);
+    const upd = this.db.prepare(
+      `UPDATE decision_anchors SET prev_hash=?, hash=? WHERE seq=?;`
+    );
 
-    return { deleted: Number(info.changes ?? 0), remaining: after };
-  });
- }
+    for (const r of rows) {
+      const hash = computeAnchorHash({
+        seq: r.seq,
+        at: r.at,
+        decision_id: r.decision_id,
+        snapshot_up_to_seq: r.snapshot_up_to_seq,
+        checkpoint_hash: r.checkpoint_hash ?? null,
+        root_hash: r.root_hash ?? null,
+        prev_hash,
+      });
 
+      upd.run(prev_hash, hash, r.seq);
+      prev_hash = hash;
+    }
+  }
+
+  // ✅ keep ONE pruneAnchors only (you previously had duplicates)
+  async pruneAnchors(keep_last_n: number): Promise<{ deleted: number; remaining: number }> {
+    return this.runInTransaction(async () => {
+      const n = Math.max(0, Math.floor(keep_last_n));
+
+      const beforeRow = this.db.prepare(`SELECT COUNT(*) AS c FROM decision_anchors;`).get() as { c: number };
+      const before = Number(beforeRow?.c ?? 0);
+
+      if (n === 0) {
+        const info = this.db.prepare(`DELETE FROM decision_anchors;`).run();
+        return { deleted: Number(info.changes ?? 0), remaining: 0 };
+      }
+
+      const info = this.db
+        .prepare(
+          `
+          DELETE FROM decision_anchors
+          WHERE seq NOT IN (
+            SELECT seq
+            FROM decision_anchors
+            ORDER BY seq DESC
+            LIMIT ?
+          );
+          `
+        )
+        .run(n);
+
+      // critical: re-chain remaining anchors so verification works
+      this.rechainAnchors();
+
+      const afterRow = this.db.prepare(`SELECT COUNT(*) AS c FROM decision_anchors;`).get() as { c: number };
+      const after = Number(afterRow?.c ?? 0);
+
+      return { deleted: before - after, remaining: after };
+    });
+  }
 }
-
 

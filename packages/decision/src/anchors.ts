@@ -1,3 +1,4 @@
+// packages/decision/src/anchors.ts
 import crypto from "node:crypto";
 
 export type DecisionAnchorRecord = {
@@ -7,38 +8,46 @@ export type DecisionAnchorRecord = {
   decision_id: string;
   snapshot_up_to_seq: number;
 
+  // snapshot integrity (copied from snapshot row)
   checkpoint_hash?: string | null;
   root_hash?: string | null;
 
+  // tamper-evident global chain
   prev_hash?: string | null;
   hash?: string | null;
 };
 
 export type AppendAnchorInput = Omit<DecisionAnchorRecord, "seq" | "prev_hash" | "hash">;
 
-export type AnchorPolicy = {
-  enabled: boolean;
-};
-
-export type AnchorRetentionPolicy = {
-  keep_last_n_anchors: number;
-};
-
 export type DecisionAnchorStore = {
   appendAnchor(input: AppendAnchorInput): Promise<DecisionAnchorRecord>;
   listAnchors(): Promise<DecisionAnchorRecord[]>;
 
+  // optional helpers
   getLastAnchor?(): Promise<DecisionAnchorRecord | null>;
 
   /**
-   * ✅ Feature 26: global anchor retention
-   * Implementations MUST preserve verifiability by re-chaining remaining anchors.
+   * ✅ Feature 27: idempotent anchor writes
+   * If an anchor already exists for (decision_id, snapshot_up_to_seq), return it.
    */
-  pruneAnchors?(keep_last_n: number): Promise<{ deleted: number; remaining: number }>;
+  getAnchorForSnapshot?(
+    decision_id: string,
+    snapshot_up_to_seq: number
+  ): Promise<DecisionAnchorRecord | null>;
+
+  /**
+   * Optional global retention
+   * (feature 26 already uses this in sqlite-store)
+   */
+  pruneAnchors?(keep_last_n: number): Promise<{ deleted: number; remaining?: number }>;
+};
+
+export type AnchorPolicy = {
+  enabled: boolean;
 };
 
 // -------------------------
-// Stable hashing (must match event hashing style)
+// Stable hashing (must match your event hashing style)
 // -------------------------
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -89,4 +98,3 @@ export function computeAnchorHash(input: {
 
   return sha256Hex(payload);
 }
-

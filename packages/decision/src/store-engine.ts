@@ -1,3 +1,4 @@
+// packages/decision/src/store-engine.ts
 import { createDecisionV2 } from "./decision.js";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
@@ -5,17 +6,9 @@ import type { DecisionEngineOptions } from "./engine.js";
 import { replayDecision } from "./engine.js";
 import type { PolicyViolation } from "./policy.js";
 import type { DecisionEventRecord, DecisionStore } from "./store.js";
-import type {
-  DecisionSnapshotStore,
-  SnapshotPolicy,
-  SnapshotRetentionPolicy,
-} from "./snapshots.js";
+import type { DecisionSnapshotStore, SnapshotPolicy, SnapshotRetentionPolicy } from "./snapshots.js";
 import { shouldCreateSnapshot, shouldPruneEventsAfterSnapshot } from "./snapshots.js";
-import type {
-  AnchorPolicy,
-  AnchorRetentionPolicy,
-  DecisionAnchorStore,
-} from "./anchors.js";
+import type { AnchorPolicy, DecisionAnchorStore } from "./anchors.js";
 
 export type StoreApplyResult =
   | { ok: true; decision: Decision; warnings: PolicyViolation[] }
@@ -49,10 +42,12 @@ export async function applyEventWithStore(
     snapshotPolicy?: SnapshotPolicy;
     snapshotRetentionPolicy?: SnapshotRetentionPolicy;
 
-    // ✅ Feature 25/26: anchors + retention
+    // anchors
     anchorStore?: DecisionAnchorStore;
     anchorPolicy?: AnchorPolicy;
-    anchorRetentionPolicy?: AnchorRetentionPolicy;
+
+    // (if you already have this, keep it)
+    anchorRetentionPolicy?: { keep_last_n_anchors: number };
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -83,9 +78,7 @@ export async function applyEventWithStore(
             {
               code: "CONCURRENT_MODIFICATION",
               severity: "BLOCK",
-              message: `Expected version ${input.expected_current_version} but current is ${
-                curVer ?? "null"
-              }.`,
+              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
             },
           ],
         };
@@ -143,15 +136,14 @@ export async function applyEventWithStore(
 
     await store.putDecision(rr.decision);
 
-    // 6) snapshot + retention + anchors
+    // 6) snapshot + retention + anchors (optional)
     if (input.snapshotStore && input.snapshotPolicy) {
       const lastSeq = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]!.seq : baseSeq;
       const lastSnapSeq = snapshot?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
         const lastRec = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]! : null;
-        const checkpoint_hash =
-          lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
+        const checkpoint_hash = lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
 
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
@@ -161,20 +153,27 @@ export async function applyEventWithStore(
           checkpoint_hash,
         });
 
-        // ✅ Feature 25: append anchor
+        // ✅ Feature 27: idempotent anchor for latest snapshot
         const anchorEnabled = input.anchorPolicy?.enabled ?? true;
         if (anchorEnabled && input.anchorStore) {
           const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
           if (latest) {
-            await input.anchorStore.appendAnchor({
-              at: nowIso(opts),
-              decision_id: input.decision_id,
-              snapshot_up_to_seq: latest.up_to_seq,
-              checkpoint_hash: (latest as any).checkpoint_hash ?? null,
-              root_hash: (latest as any).root_hash ?? null,
-            });
+            const already =
+              input.anchorStore.getAnchorForSnapshot
+                ? await input.anchorStore.getAnchorForSnapshot(input.decision_id, latest.up_to_seq)
+                : null;
 
-            // ✅ Feature 26: prune anchors (and store must re-chain)
+            if (!already) {
+              await input.anchorStore.appendAnchor({
+                at: nowIso(opts),
+                decision_id: input.decision_id,
+                snapshot_up_to_seq: latest.up_to_seq,
+                checkpoint_hash: (latest as any).checkpoint_hash ?? null,
+                root_hash: (latest as any).root_hash ?? null,
+              });
+            }
+
+            // optional anchor retention
             const keepN = input.anchorRetentionPolicy?.keep_last_n_anchors;
             if (typeof keepN === "number" && input.anchorStore.pruneAnchors) {
               await input.anchorStore.pruneAnchors(keepN);
