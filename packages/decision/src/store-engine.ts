@@ -1,4 +1,3 @@
-// packages/decision/src/store-engine.ts
 import { createDecisionV2 } from "./decision.js";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
@@ -12,6 +11,11 @@ import type {
   SnapshotRetentionPolicy,
 } from "./snapshots.js";
 import { shouldCreateSnapshot, shouldPruneEventsAfterSnapshot } from "./snapshots.js";
+import type {
+  AnchorPolicy,
+  AnchorRetentionPolicy,
+  DecisionAnchorStore,
+} from "./anchors.js";
 
 export type StoreApplyResult =
   | { ok: true; decision: Decision; warnings: PolicyViolation[] }
@@ -44,6 +48,11 @@ export async function applyEventWithStore(
     snapshotStore?: DecisionSnapshotStore;
     snapshotPolicy?: SnapshotPolicy;
     snapshotRetentionPolicy?: SnapshotRetentionPolicy;
+
+    // ✅ Feature 25/26: anchors + retention
+    anchorStore?: DecisionAnchorStore;
+    anchorPolicy?: AnchorPolicy;
+    anchorRetentionPolicy?: AnchorRetentionPolicy;
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -134,16 +143,15 @@ export async function applyEventWithStore(
 
     await store.putDecision(rr.decision);
 
-    // 6) snapshot + retention (optional)
+    // 6) snapshot + retention + anchors
     if (input.snapshotStore && input.snapshotPolicy) {
       const lastSeq = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]!.seq : baseSeq;
       const lastSnapSeq = snapshot?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
-        // ✅ Feature 18: store checkpoint_hash if the store provides event hashes
         const lastRec = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]! : null;
         const checkpoint_hash =
-          (lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null);
+          lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
 
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
@@ -153,7 +161,28 @@ export async function applyEventWithStore(
           checkpoint_hash,
         });
 
-        // retention pass (all optional)
+        // ✅ Feature 25: append anchor
+        const anchorEnabled = input.anchorPolicy?.enabled ?? true;
+        if (anchorEnabled && input.anchorStore) {
+          const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
+          if (latest) {
+            await input.anchorStore.appendAnchor({
+              at: nowIso(opts),
+              decision_id: input.decision_id,
+              snapshot_up_to_seq: latest.up_to_seq,
+              checkpoint_hash: (latest as any).checkpoint_hash ?? null,
+              root_hash: (latest as any).root_hash ?? null,
+            });
+
+            // ✅ Feature 26: prune anchors (and store must re-chain)
+            const keepN = input.anchorRetentionPolicy?.keep_last_n_anchors;
+            if (typeof keepN === "number" && input.anchorStore.pruneAnchors) {
+              await input.anchorStore.pruneAnchors(keepN);
+            }
+          }
+        }
+
+        // snapshot retention pass
         if (input.snapshotRetentionPolicy) {
           const keepLast = input.snapshotRetentionPolicy.keep_last_n_snapshots;
 

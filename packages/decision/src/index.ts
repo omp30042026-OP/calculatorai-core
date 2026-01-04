@@ -63,3 +63,6 @@ export type { VerifyMerkleProofResult } from "./merkle-proof.js";
 export { verifyEventIncludedFromLatestSnapshot } from "./store-verify-inclusion.js";
 export type { VerifyInclusionResult } from "./store-verify-inclusion.js";
 
+export type { DecisionAnchorStore, DecisionAnchorRecord, AnchorPolicy } from "./anchors.js";
+export { verifyGlobalAnchorChain } from "./store-verify-anchors.js";
+
