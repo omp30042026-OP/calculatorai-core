@@ -94,6 +94,9 @@ export type DecisionSnapshotStore = {
     decision_id: string,
     up_to_seq: number
   ): Promise<{ deleted: number }>;
+
+  // ✅ Feature 32: decision state attestation
+    state_hash?: string | null;
 };
 
 /**

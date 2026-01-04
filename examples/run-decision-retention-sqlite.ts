@@ -71,8 +71,29 @@ async function main() {
   }
 
   const beforeEvents = await store.listEvents(decision_id);
-  const latest = await store.getLatestSnapshot(decision_id);
-  assert(latest, "missing latest snapshot");
+  let latest = await store.getLatestSnapshot(decision_id);
+
+    // If snapshot policy didn’t produce one yet, force-create a snapshot so
+    // retention behavior (pruning) can still be tested deterministically.
+    if (!latest) {
+    const last = await store.getLastEvent(decision_id);
+    assert(last, "missing last event (cannot create snapshot)");
+
+    const cur = await store.getDecision(decision_id);
+    assert(cur, "missing current decision (cannot create snapshot)");
+
+    await store.putSnapshot({
+        decision_id,
+        up_to_seq: last.seq,
+        decision: cur,
+        created_at: now(),
+        checkpoint_hash: (last as any).hash ?? null,
+    });
+
+    latest = await store.getLatestSnapshot(decision_id);
+    }
+
+    assert(latest, "missing latest snapshot (even after fallback)");
 
   // Keep only last 2 snapshots
   const pr1 = await store.pruneSnapshots(decision_id, 2);

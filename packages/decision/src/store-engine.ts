@@ -9,6 +9,43 @@ import type { DecisionEventRecord, DecisionStore } from "./store.js";
 import type { DecisionSnapshotStore, SnapshotPolicy, SnapshotRetentionPolicy } from "./snapshots.js";
 import { shouldCreateSnapshot, shouldPruneEventsAfterSnapshot } from "./snapshots.js";
 import type { AnchorPolicy, DecisionAnchorStore } from "./anchors.js";
+import crypto from "node:crypto";
+
+
+function stableStringify(value: unknown): string {
+  const seen = new WeakSet<object>();
+
+  const norm = (v: any): any => {
+    if (v === null) return null;
+    if (typeof v !== "object") return v;
+
+    if (seen.has(v)) return "[Circular]";
+    seen.add(v);
+
+    if (Array.isArray(v)) return v.map(norm);
+
+    const out: Record<string, any> = {};
+    for (const k of Object.keys(v).sort()) {
+      const vv = v[k];
+      if (typeof vv === "undefined") continue;
+      out[k] = norm(vv);
+    }
+    return out;
+  };
+
+  return JSON.stringify(norm(value));
+}
+
+function sha256Hex(s: string): string {
+  return crypto.createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+function computeStateHash(decision: unknown): string {
+  return sha256Hex(stableStringify(decision));
+}
+
+
+
 
 export type StoreApplyResult =
   | { ok: true; decision: Decision; warnings: PolicyViolation[] }
@@ -145,40 +182,67 @@ export async function applyEventWithStore(
         const lastRec = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]! : null;
         const checkpoint_hash = lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
 
-        await input.snapshotStore.putSnapshot({
-          decision_id: input.decision_id,
-          up_to_seq: lastSeq,
-          decision: rr.decision,
-          created_at: nowIso(opts),
-          checkpoint_hash,
-        });
+
+
+        function sha256Hex(s: string): string {
+        return crypto.createHash("sha256").update(s, "utf8").digest("hex");
+        }
+
+        function stableStringify(value: unknown): string {
+        const seen = new WeakSet<object>();
+        const norm = (v: any): any => {
+            if (v === null) return null;
+            if (typeof v !== "object") return v;
+            if (seen.has(v)) return "[Circular]";
+            seen.add(v);
+            if (Array.isArray(v)) return v.map(norm);
+            const out: Record<string, any> = {};
+            for (const k of Object.keys(v).sort()) {
+            const vv = v[k];
+            if (typeof vv === "undefined") continue;
+            out[k] = norm(vv);
+            }
+            return out;
+        };
+        return JSON.stringify(norm(value));
+        }
+
+        function computeStateHash(decision: any): string {
+        // hash the decision state at snapshot time
+        return sha256Hex(stableStringify(decision));
+        }
 
         // ✅ Feature 27: idempotent anchor for latest snapshot
         const anchorEnabled = input.anchorPolicy?.enabled ?? true;
         if (anchorEnabled && input.anchorStore) {
-          const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
-          if (latest) {
+        const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
+        if (latest) {
+            const aStore = input.anchorStore as any;
+
             const already =
-              input.anchorStore.getAnchorForSnapshot
-                ? await input.anchorStore.getAnchorForSnapshot(input.decision_id, latest.up_to_seq)
+            typeof aStore.getAnchorForSnapshot === "function"
+                ? await aStore.getAnchorForSnapshot(input.decision_id, latest.up_to_seq)
+                : typeof aStore.findAnchorByCheckpoint === "function"
+                ? await aStore.findAnchorByCheckpoint(input.decision_id, latest.up_to_seq)
                 : null;
 
             if (!already) {
-              await input.anchorStore.appendAnchor({
+            await input.anchorStore.appendAnchor({
                 at: nowIso(opts),
                 decision_id: input.decision_id,
                 snapshot_up_to_seq: latest.up_to_seq,
                 checkpoint_hash: (latest as any).checkpoint_hash ?? null,
                 root_hash: (latest as any).root_hash ?? null,
-              });
+                state_hash: computeStateHash(rr.decision),
+                });
             }
 
             // optional anchor retention
             const keepN = input.anchorRetentionPolicy?.keep_last_n_anchors;
-            if (typeof keepN === "number" && input.anchorStore.pruneAnchors) {
-              await input.anchorStore.pruneAnchors(keepN);
+            if (typeof keepN === "number" && typeof aStore.pruneAnchors === "function") {
+            await aStore.pruneAnchors(keepN);
             }
-          }
+        }
         }
 
         // snapshot retention pass

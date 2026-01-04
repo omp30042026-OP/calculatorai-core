@@ -1,4 +1,3 @@
-// packages/decision/src/anchors.ts
 import crypto from "node:crypto";
 
 export type DecisionAnchorRecord = {
@@ -12,12 +11,18 @@ export type DecisionAnchorRecord = {
   checkpoint_hash?: string | null;
   root_hash?: string | null;
 
+  // ✅ Feature 32: decision state attestation
+  state_hash?: string | null;
+
   // tamper-evident global chain
   prev_hash?: string | null;
   hash?: string | null;
 };
 
-export type AppendAnchorInput = Omit<DecisionAnchorRecord, "seq" | "prev_hash" | "hash">;
+export type AppendAnchorInput = Omit<
+  DecisionAnchorRecord,
+  "seq" | "prev_hash" | "hash"
+>;
 
 export type DecisionAnchorStore = {
   appendAnchor(input: AppendAnchorInput): Promise<DecisionAnchorRecord>;
@@ -26,21 +31,24 @@ export type DecisionAnchorStore = {
   // optional helpers
   getLastAnchor?(): Promise<DecisionAnchorRecord | null>;
 
-  /**
-   * ✅ Feature 27: idempotent anchor writes
-   * If an anchor already exists for (decision_id, snapshot_up_to_seq), return it.
-   */
+  // ✅ Feature 27: canonical lookup (sqlite-store implements this)
   getAnchorForSnapshot?(
     decision_id: string,
     snapshot_up_to_seq: number
   ): Promise<DecisionAnchorRecord | null>;
 
-  /**
-   * Optional global retention
-   * (feature 26 already uses this in sqlite-store)
-   */
-  pruneAnchors?(keep_last_n: number): Promise<{ deleted: number; remaining?: number }>;
+  // ✅ Back-compat helper name (some code uses this name)
+  findAnchorByCheckpoint?(
+    decision_id: string,
+    snapshot_up_to_seq: number
+  ): Promise<DecisionAnchorRecord | null>;
+
+  // ✅ Feature 26 retention: keep last N anchors globally
+  pruneAnchors?(
+    keep_last_n: number
+  ): Promise<{ deleted: number; remaining: number }>;
 };
+
 
 export type AnchorPolicy = {
   enabled: boolean;
@@ -84,6 +92,7 @@ export function computeAnchorHash(input: {
   snapshot_up_to_seq: number;
   checkpoint_hash?: string | null;
   root_hash?: string | null;
+  state_hash?: string | null; // ✅ Feature 32
   prev_hash?: string | null;
 }): string {
   const payload = stableStringify({
@@ -93,8 +102,10 @@ export function computeAnchorHash(input: {
     snapshot_up_to_seq: input.snapshot_up_to_seq,
     checkpoint_hash: input.checkpoint_hash ?? null,
     root_hash: input.root_hash ?? null,
+    state_hash: input.state_hash ?? null, // ✅ Feature 32
     prev_hash: input.prev_hash ?? null,
   });
 
   return sha256Hex(payload);
 }
+
