@@ -2,6 +2,7 @@
 import crypto from "node:crypto";
 import type { DecisionReceiptV1, AnchorHeadPin } from "./decision-receipt.js";
 import { computeAnchorHash } from "./anchors.js";
+import type { Decision } from "./decision.js";
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -29,6 +30,11 @@ function stableStringify(value: unknown): string {
 
 function sha256Hex(s: string): string {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
+}
+
+// ✅ Feature 34.x: compute decision state hash deterministically
+function computeStateHash(decision: unknown): string {
+  return sha256Hex(stableStringify(decision));
 }
 
 // If later you want receipts signed, sign this exact payload.
@@ -72,16 +78,16 @@ export function verifyReceiptSelfIntegrity(receipt: DecisionReceiptV1): ReceiptV
     };
   }
 
-  // recompute anchor hash (core offline integrity)
-  const expected_anchor_hash = computeAnchorHash({
-    seq: receipt.anchor.seq,
-    at: receipt.anchor.at,
-    decision_id: receipt.anchor.decision_id,
-    snapshot_up_to_seq: receipt.anchor.snapshot_up_to_seq,
-    checkpoint_hash: receipt.anchor.checkpoint_hash ?? null,
-    root_hash: receipt.anchor.root_hash ?? null,
-    prev_hash: receipt.anchor.prev_hash ?? null,
-  });
+    const expected_anchor_hash = computeAnchorHash({
+        seq: receipt.anchor.seq,
+        at: receipt.anchor.at,
+        decision_id: receipt.anchor.decision_id,
+        snapshot_up_to_seq: receipt.anchor.snapshot_up_to_seq,
+        checkpoint_hash: receipt.anchor.checkpoint_hash ?? null,
+        root_hash: receipt.anchor.root_hash ?? null,
+        state_hash: receipt.anchor.state_hash ?? null, // ✅ IMPORTANT
+        prev_hash: receipt.anchor.prev_hash ?? null,
+    });
 
   if (expected_anchor_hash !== receipt.anchor.hash) {
     return {
@@ -94,6 +100,33 @@ export function verifyReceiptSelfIntegrity(receipt: DecisionReceiptV1): ReceiptV
   }
 
   return { ok: true, message: "Receipt self-integrity checks passed." };
+}
+
+// ✅ Feature 34.x: optional check — if you have the decision object offline too
+export function verifyReceiptStateHash(
+  receipt: DecisionReceiptV1,
+  decision?: Decision | unknown | null
+): ReceiptVerifyResult {
+  const expected = (receipt.anchor as any).state_hash ?? null;
+
+  // if receipt doesn't carry it, skip (backward compatible)
+  if (!expected) return { ok: true, message: "No state_hash in receipt; skipping state check." };
+
+  // if caller didn't provide decision, skip
+  if (!decision) return { ok: true, message: "No decision provided; skipping state check." };
+
+  const actual = computeStateHash(decision);
+  if (actual !== expected) {
+    return {
+      ok: false,
+      code: "STATE_HASH_MISMATCH",
+      message: "Receipt state_hash does not match provided decision state hash.",
+      expected,
+      actual,
+    };
+  }
+
+  return { ok: true, message: "Decision state_hash check passed." };
 }
 
 // anti-rollback when you know the head you pinned at issuance time
@@ -152,11 +185,15 @@ export function verifyReceiptOffline(
   receipt: DecisionReceiptV1,
   opts?: {
     pinned_head?: AnchorHeadPin | null;
+    decision?: Decision | unknown | null; // ✅ Feature 34.x
     verifySignatureFn?: (payload: string, sig: string, alg: string, key_id?: string) => boolean;
   }
 ): ReceiptVerifyResult {
   const r1 = verifyReceiptSelfIntegrity(receipt);
   if (!r1.ok) return r1;
+
+  const r1b = verifyReceiptStateHash(receipt, opts?.decision ?? null);
+  if (!r1b.ok) return r1b;
 
   const r2 = verifyReceiptAgainstPinnedHead(receipt, opts?.pinned_head ?? null);
   if (!r2.ok) return r2;

@@ -36,13 +36,16 @@ export * from "./snapshots.js";
 
 export * from "./sqlite-store.js";
 export * from "./sqlite-snapshot-store.js";
-
 export * from "./store-history.js";
 export * from "./store-diff.js";
 export * from "./store-audit.js";
 export * from "./store-timeline.js";
 export * from "./store-lineage.js";
 export * from "./store-fork-graph.js";
+
+export * from "./decision-receipt.js";
+export * from "./receipt-verify.js";
+export * from "./anchors.js";
 
 export { verifyDecisionHashChain } from "./store-verify.js";
 export type { VerifyHashChainOptions, VerifyHashChainResult } from "./store-verify.js";

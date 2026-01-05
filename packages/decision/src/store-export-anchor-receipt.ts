@@ -72,7 +72,7 @@ export async function exportAnchorReceiptV2(
       snapshot_up_to_seq: anchor.snapshot_up_to_seq,
       checkpoint_hash: anchor.checkpoint_hash ?? null,
       root_hash: anchor.root_hash ?? null,
-      state_hash: (anchor as any).state_hash ?? null, // ✅ Feature 32
+      state_hash: (anchor as any).state_hash ?? null,
       prev_hash: anchor.prev_hash ?? null,
       hash: anchor.hash,
     } as any,
@@ -132,10 +132,13 @@ export async function exportDecisionReceiptV1(a: any, b?: any, c?: any): Promise
         snapshot_up_to_seq: anchor.snapshot_up_to_seq,
         checkpoint_hash: anchor.checkpoint_hash ?? null,
         root_hash: anchor.root_hash ?? null,
-        state_hash: (anchor as any).state_hash ?? null, // ✅ Feature 32
+
+        // ✅ Feature 34.x
+        state_hash: (anchor as any).state_hash ?? null,
+
         prev_hash: anchor.prev_hash ?? null,
         hash: anchor.hash,
-      },
+       },
       pinned_head,
       issued_at: new Date().toISOString(),
       signature: { alg: "none" },

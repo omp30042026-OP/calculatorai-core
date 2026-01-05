@@ -22,6 +22,9 @@ export type DecisionReceiptV1 = {
     checkpoint_hash: string | null;
     root_hash: string | null;
 
+    // ✅ Feature 32/34: snapshot decision state attestation
+    state_hash: string | null;
+
     prev_hash: string | null;
     hash: string;
   };
@@ -40,4 +43,8 @@ export type DecisionReceiptV1 = {
 };
 
 export type DecisionReceipt = DecisionReceiptV1;
+
+
+
+
 
