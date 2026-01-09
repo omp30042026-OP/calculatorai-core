@@ -14,11 +14,14 @@ function makeDeterministicNow(startIso = "2025-01-01T00:00:00.000Z") {
   };
 }
 
-async function ensureSnapshotAndAnchor(store: SqliteDecisionStore, decision_id: string, now: () => string) {
+async function ensureSnapshotAndAnchor(
+  store: SqliteDecisionStore,
+  decision_id: string,
+  now: () => string
+) {
   let snap = await store.getLatestSnapshot(decision_id);
   if (snap) return snap;
 
-  // ✅ manually create snapshot at current head
   const last = await store.getLastEvent(decision_id);
   if (!last) throw new Error("no events; cannot create snapshot");
 
@@ -30,21 +33,18 @@ async function ensureSnapshotAndAnchor(store: SqliteDecisionStore, decision_id: 
     up_to_seq: last.seq,
     decision,
     created_at: now(),
-    // checkpoint_hash/root_hash can be omitted; SqliteDecisionStore.putSnapshot will compute them
   } as any);
 
   snap = await store.getLatestSnapshot(decision_id);
   if (!snap) throw new Error("snapshot still missing after manual putSnapshot");
 
-  // ✅ ensure there is an anchor for this snapshot (receipt export depends on anchors)
   await store.appendAnchor({
     at: now(),
     decision_id,
     snapshot_up_to_seq: snap.up_to_seq,
     checkpoint_hash: (snap as any).checkpoint_hash ?? null,
     root_hash: (snap as any).root_hash ?? null,
-    // state_hash is optional; include only if your schema + AppendAnchorInput supports it
-    // state_hash: (snap as any).state_hash ?? null,
+    state_hash: (snap as any).state_hash ?? null,
   } as any);
 
   return snap;
@@ -66,7 +66,11 @@ async function main() {
     store,
     {
       decision_id,
-      metaIfCreate: { title: "Receipt Offline", owner_id: "system", source: "receipt-offline" },
+      metaIfCreate: {
+        title: "Receipt Offline",
+        owner_id: "system",
+        source: "receipt-offline",
+      },
       event: { type: "VALIDATE", actor_id: "system" },
       idempotency_key: "v1",
 
@@ -123,7 +127,7 @@ async function main() {
   );
   if (!r3.ok) throw new Error("tick blocked");
 
-  // ✅ guarantee snapshot exists (even if snapshot policy didn’t fire)
+  // ✅ guarantee snapshot+anchor exist
   const snap = await ensureSnapshotAndAnchor(store, decision_id, now);
 
   const receipt = await exportDecisionReceiptV1({
@@ -131,13 +135,28 @@ async function main() {
     decision_id,
     snapshot_up_to_seq: snap.up_to_seq,
   });
-
   if (!receipt) throw new Error("no receipt");
 
   const decision = await store.getDecision(decision_id);
-
   const verify = verifyReceiptOffline(receipt, { decision });
-  console.log({ ok: verify.ok, verify, receipt });
+
+  // ✅ emit clean JSON ONLY (keeps /tmp/receipt.json valid)
+  process.stdout.write(
+    JSON.stringify(
+      {
+        ok: verify.ok,
+        verify,
+        receipt,
+        previews: {
+          VALIDATE: (r1 as any).consequence_preview ?? null,
+          SIMULATE: (r2 as any).consequence_preview ?? null,
+          ATTACH_ARTIFACTS: (r3 as any).consequence_preview ?? null,
+        },
+      },
+      null,
+      2
+    ) + "\n"
+  );
 }
 
 main().catch((e) => {
