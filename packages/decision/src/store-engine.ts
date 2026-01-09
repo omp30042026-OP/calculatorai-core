@@ -6,11 +6,26 @@ import type { DecisionEngineOptions } from "./engine.js";
 import { replayDecision } from "./engine.js";
 import type { PolicyViolation } from "./policy.js";
 import type { DecisionEventRecord, DecisionStore } from "./store.js";
-import type { DecisionSnapshotStore, SnapshotPolicy, SnapshotRetentionPolicy } from "./snapshots.js";
-import { shouldCreateSnapshot, shouldPruneEventsAfterSnapshot } from "./snapshots.js";
+import type {
+  DecisionSnapshotStore,
+  SnapshotPolicy,
+  SnapshotRetentionPolicy,
+} from "./snapshots.js";
+import {
+  shouldCreateSnapshot,
+  shouldPruneEventsAfterSnapshot,
+} from "./snapshots.js";
 import type { AnchorPolicy, DecisionAnchorStore } from "./anchors.js";
 import crypto from "node:crypto";
 
+import { computeConsequencePreview } from "./consequence-preview.js";
+
+// -----------------------------
+// small utils
+// -----------------------------
+function nowIso(opts: DecisionEngineOptions): string {
+  return (opts.now ?? (() => new Date().toISOString()))();
+}
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -44,17 +59,6 @@ function computeStateHash(decision: unknown): string {
   return sha256Hex(stableStringify(decision));
 }
 
-
-
-
-export type StoreApplyResult =
-  | { ok: true; decision: Decision; warnings: PolicyViolation[] }
-  | { ok: false; decision: Decision; violations: PolicyViolation[] };
-
-function nowIso(opts: DecisionEngineOptions): string {
-  return (opts.now ?? (() => new Date().toISOString()))();
-}
-
 async function loadDeltaEvents(
   store: DecisionStore,
   decision_id: string,
@@ -65,6 +69,26 @@ async function loadDeltaEvents(
   return all.filter((r) => r.seq > after_seq);
 }
 
+// -----------------------------
+// result
+// -----------------------------
+export type StoreApplyResult =
+  | {
+      ok: true;
+      decision: Decision;
+      warnings: PolicyViolation[];
+      consequence_preview?: ReturnType<typeof computeConsequencePreview>;
+    }
+  | {
+      ok: false;
+      decision: Decision;
+      violations: PolicyViolation[];
+      consequence_preview?: ReturnType<typeof computeConsequencePreview>;
+    };
+
+// -----------------------------
+// main
+// -----------------------------
 export async function applyEventWithStore(
   store: DecisionStore,
   input: {
@@ -83,8 +107,11 @@ export async function applyEventWithStore(
     anchorStore?: DecisionAnchorStore;
     anchorPolicy?: AnchorPolicy;
 
-    // (if you already have this, keep it)
+    // optional anchor retention
     anchorRetentionPolicy?: { keep_last_n_anchors: number };
+
+    // optional behavior
+    block_on_consequence_block?: boolean; // default false
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -93,36 +120,7 @@ export async function applyEventWithStore(
     : async <T>(fn: () => Promise<T>) => fn();
 
   return run(async () => {
-    // 0) optimistic lock
-    if (typeof input.expected_current_version === "number") {
-      const curVer =
-        (await store.getCurrentVersion?.(input.decision_id)) ??
-        (await store.getDecision(input.decision_id))?.version ??
-        null;
-
-      if (curVer !== input.expected_current_version) {
-        const d =
-          (await store.getDecision(input.decision_id)) ??
-          createDecisionV2(
-            { decision_id: input.decision_id, meta: input.metaIfCreate ?? {} },
-            opts.now
-          );
-
-        return {
-          ok: false,
-          decision: d,
-          violations: [
-            {
-              code: "CONCURRENT_MODIFICATION",
-              severity: "BLOCK",
-              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
-            },
-          ],
-        };
-      }
-    }
-
-    // 1) ensure root exists
+    // 1) ensure root exists (create if missing)
     let root = await store.getRootDecision(input.decision_id);
     if (!root) {
       root = createDecisionV2(
@@ -138,10 +136,76 @@ export async function applyEventWithStore(
       ? await input.snapshotStore.getLatestSnapshot(input.decision_id)
       : null;
 
-    const baseDecision = snapshot?.decision ?? root;
-    const baseSeq = snapshot?.up_to_seq ?? 0;
+    const baseDecision = (snapshot as any)?.decision ?? root;
+    const baseSeq = (snapshot as any)?.up_to_seq ?? 0;
 
-    // 3) idempotency shortcut
+    // 3) compute "current head" decision (before new event)
+    const deltaBefore = await loadDeltaEvents(store, input.decision_id, baseSeq);
+    const rrBefore = replayDecision(baseDecision, deltaBefore.map((r) => r.event), opts);
+
+    // ✅ TS-safe narrowing (fixes the red lines)
+    if (rrBefore.ok === false) {
+      return {
+        ok: false,
+        decision: rrBefore.decision,
+        violations: rrBefore.violations,
+      };
+    }
+
+    const headDecision = rrBefore.decision;
+    const headWarnings = rrBefore.warnings;
+
+    // ✅ consequence preview should use the REAL current state
+    const consequence_preview = computeConsequencePreview({
+      decision: headDecision ?? null,
+      event: input.event,
+    });
+
+    // 0) optimistic lock (after we know current head)
+    if (typeof input.expected_current_version === "number") {
+      const curVer =
+        (await store.getCurrentVersion?.(input.decision_id)) ??
+        (await store.getDecision(input.decision_id))?.version ??
+        ((headDecision as any)?.version ?? null);
+
+      if (curVer !== input.expected_current_version) {
+        const d = (await store.getDecision(input.decision_id)) ?? headDecision ?? root;
+
+        return {
+          ok: false,
+          decision: d,
+          violations: [
+            {
+              code: "CONCURRENT_MODIFICATION",
+              severity: "BLOCK",
+              message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
+            },
+          ],
+          consequence_preview,
+        };
+      }
+    }
+
+    // optional: block if preview says BLOCK
+    if (
+      input.block_on_consequence_block === true &&
+      consequence_preview.warnings.some((w) => w.severity === "BLOCK")
+    ) {
+      return {
+        ok: false,
+        decision: headDecision,
+        violations: [
+          {
+            code: "CONSEQUENCE_BLOCKED",
+            severity: "BLOCK",
+            message: "Event blocked by consequence preview.",
+          },
+        ],
+        consequence_preview,
+      };
+    }
+
+    // 4) idempotency shortcut
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
         input.decision_id,
@@ -149,100 +213,91 @@ export async function applyEventWithStore(
       );
 
       if (existing) {
-        const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
-        const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
-
-        if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
-        await store.putDecision(rr.decision);
-        return { ok: true, decision: rr.decision, warnings: rr.warnings };
+        // event already persisted; return current head
+        await store.putDecision(headDecision);
+        return {
+          ok: true,
+          decision: headDecision,
+          warnings: headWarnings,
+          consequence_preview,
+        };
       }
     }
 
-    // 4) append event
+    // 5) append event
     await store.appendEvent(input.decision_id, {
       at: nowIso(opts),
       event: input.event,
       idempotency_key: input.idempotency_key,
     });
 
-    // 5) replay delta
-    const deltaRecs = await loadDeltaEvents(store, input.decision_id, baseSeq);
-    const rr = replayDecision(baseDecision, deltaRecs.map((r) => r.event), opts);
+    // 6) replay delta (base -> all events up to now)
+    const deltaAfter = await loadDeltaEvents(store, input.decision_id, baseSeq);
+    const rr = replayDecision(baseDecision, deltaAfter.map((r) => r.event), opts);
 
-    if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+    if (rr.ok === false) {
+      return {
+        ok: false,
+        decision: rr.decision,
+        violations: rr.violations,
+        consequence_preview,
+      };
+    }
 
     await store.putDecision(rr.decision);
 
-    // 6) snapshot + retention + anchors (optional)
+    // 7) snapshot + retention + anchors (optional)
     if (input.snapshotStore && input.snapshotPolicy) {
-      const lastSeq = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]!.seq : baseSeq;
-      const lastSnapSeq = snapshot?.up_to_seq ?? 0;
+      const lastSeq = deltaAfter.length ? deltaAfter[deltaAfter.length - 1]!.seq : baseSeq;
+      const lastSnapSeq = (snapshot as any)?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
-        const lastRec = deltaRecs.length ? deltaRecs[deltaRecs.length - 1]! : null;
-        const checkpoint_hash = lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
+        const lastRec = deltaAfter.length ? deltaAfter[deltaAfter.length - 1]! : null;
+        const checkpoint_hash =
+          lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
 
+        // create snapshot
+        await input.snapshotStore.putSnapshot({
+          decision_id: input.decision_id,
+          up_to_seq: lastSeq,
+          decision: rr.decision,
+          created_at: nowIso(opts),
+          checkpoint_hash,
+          state_hash: computeStateHash(rr.decision),
+        } as any);
 
-
-        function sha256Hex(s: string): string {
-        return crypto.createHash("sha256").update(s, "utf8").digest("hex");
-        }
-
-        function stableStringify(value: unknown): string {
-        const seen = new WeakSet<object>();
-        const norm = (v: any): any => {
-            if (v === null) return null;
-            if (typeof v !== "object") return v;
-            if (seen.has(v)) return "[Circular]";
-            seen.add(v);
-            if (Array.isArray(v)) return v.map(norm);
-            const out: Record<string, any> = {};
-            for (const k of Object.keys(v).sort()) {
-            const vv = v[k];
-            if (typeof vv === "undefined") continue;
-            out[k] = norm(vv);
-            }
-            return out;
-        };
-        return JSON.stringify(norm(value));
-        }
-
-        function computeStateHash(decision: any): string {
-        // hash the decision state at snapshot time
-        return sha256Hex(stableStringify(decision));
-        }
-
-        // ✅ Feature 27: idempotent anchor for latest snapshot
+        // anchors (idempotent per snapshot)
         const anchorEnabled = input.anchorPolicy?.enabled ?? true;
         if (anchorEnabled && input.anchorStore) {
-        const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
-        if (latest) {
-            const aStore = input.anchorStore as any;
+          const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
+
+          if (latest) {
+            const aStore: any = input.anchorStore;
 
             const already =
-            typeof aStore.getAnchorForSnapshot === "function"
-                ? await aStore.getAnchorForSnapshot(input.decision_id, latest.up_to_seq)
+              typeof aStore.getAnchorForSnapshot === "function"
+                ? await aStore.getAnchorForSnapshot(input.decision_id, (latest as any).up_to_seq)
                 : typeof aStore.findAnchorByCheckpoint === "function"
-                ? await aStore.findAnchorByCheckpoint(input.decision_id, latest.up_to_seq)
-                : null;
+                  ? await aStore.findAnchorByCheckpoint(input.decision_id, (latest as any).up_to_seq)
+                  : null;
 
             if (!already) {
-            await input.anchorStore.appendAnchor({
+              await input.anchorStore.appendAnchor({
                 at: nowIso(opts),
                 decision_id: input.decision_id,
-                snapshot_up_to_seq: latest.up_to_seq,
+                snapshot_up_to_seq: (latest as any).up_to_seq,
                 checkpoint_hash: (latest as any).checkpoint_hash ?? null,
                 root_hash: (latest as any).root_hash ?? null,
-                state_hash: computeStateHash(rr.decision),
-                });
+                state_hash: (latest as any).state_hash ?? computeStateHash(rr.decision),
+              } as any);
             }
 
             // optional anchor retention
             const keepN = input.anchorRetentionPolicy?.keep_last_n_anchors;
             if (typeof keepN === "number" && typeof aStore.pruneAnchors === "function") {
-            await aStore.pruneAnchors(keepN);
+              await aStore.pruneAnchors(keepN);
             }
-        }
+          }
         }
 
         // snapshot retention pass
@@ -259,14 +314,23 @@ export async function applyEventWithStore(
           ) {
             const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
             if (latest) {
-              await input.snapshotStore.pruneEventsUpToSeq(input.decision_id, latest.up_to_seq);
+              await input.snapshotStore.pruneEventsUpToSeq(
+                input.decision_id,
+                (latest as any).up_to_seq
+              );
             }
           }
         }
       }
     }
 
-    return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    return {
+      ok: true,
+      decision: rr.decision,
+      warnings: rr.warnings,
+      consequence_preview,
+    };
   });
 }
+
 

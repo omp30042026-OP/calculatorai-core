@@ -69,3 +69,4 @@ export type { VerifyInclusionResult } from "./store-verify-inclusion.js";
 export type { DecisionAnchorStore, DecisionAnchorRecord, AnchorPolicy } from "./anchors.js";
 export { verifyGlobalAnchorChain } from "./store-verify-anchors.js";
 
+export * from "./consequence-preview.js";
