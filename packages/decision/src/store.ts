@@ -49,6 +49,17 @@ export type MerkleProof = {
   siblings: MerkleProofStep[];
 };
 
+/**
+ * Optional snapshot row (materialized state at a given seq).
+ * Used to speed up replay for long event streams.
+ */
+export type DecisionSnapshotRecord = {
+  decision_id: string;
+  seq: number; // snapshot is valid after applying events up to this seq
+  at: string; // ISO timestamp
+  decision: Decision;
+};
+
 export type DecisionStore = {
   // decisions
   createDecision(decision: Decision): Promise<void>;
@@ -61,6 +72,7 @@ export type DecisionStore = {
   listEvents(decision_id: string): Promise<DecisionEventRecord[]>;
 
   /**
+<<<<<<< HEAD
    * V5: paging helper — return events with seq > after_seq (ordered).
    * If not provided, store-engine will fall back to listEvents + filter.
    */
@@ -90,6 +102,18 @@ export type DecisionStore = {
    * the history up to `up_to_seq` (usually snapshot.up_to_seq).
    */
   getMerkleProof?(decision_id: string, seq: number, up_to_seq: number): Promise<MerkleProof | null>;
+=======
+   * Optional helper to fetch only events after a seq.
+   * If not provided, store-engine will fall back to listEvents() + filter.
+   */
+  listEventsAfter?(decision_id: string, after_seq: number): Promise<DecisionEventRecord[]>;
+
+  /**
+   * Optional snapshot helpers
+   */
+  getLatestSnapshot?(decision_id: string): Promise<DecisionSnapshotRecord | null>;
+  saveSnapshot?(snap: DecisionSnapshotRecord): Promise<void>;
+>>>>>>> origin/main
 
   /**
    * Optional helpers for stronger guarantees in store-engine.

@@ -107,7 +107,19 @@ async function loadDeltaEvents(
 }
 
 /**
+<<<<<<< HEAD
  * If store root is actually the head, rebuild canonical DRAFT root for replay.
+=======
+ * Store-backed apply:
+ * V3 additions:
+ * - optional optimistic locking via expected_current_version
+ * - optional idempotency via idempotency_key (store may dedupe)
+ * - optional atomic txn via store.runInTransaction
+ *
+ * Snapshot additions (read-path only):
+ * - if store.getLatestSnapshot exists, replay starts from that snapshot
+ * - if store.listEventsAfter exists, only reads events after snapshot seq
+>>>>>>> origin/main
  */
 function canonicalDraftRootFromStored(root: Decision): Decision {
   const created_at = root.created_at ?? new Date().toISOString();
@@ -419,6 +431,7 @@ export async function applyEventWithStore(
       }
     }
 
+<<<<<<< HEAD
     // ✅ Feature 3
     if (input.require_signer_identity_binding === true && isApprovalLike(input.event)) {
       const meta = getMeta((input.event as any)?.meta) ?? {};
@@ -505,12 +518,40 @@ export async function applyEventWithStore(
     }
 
     // idempotency shortcut
+=======
+    // helper: choose replay base (snapshot if available, else root)
+    const snap = store.getLatestSnapshot
+      ? await store.getLatestSnapshot(input.decision_id)
+      : null;
+
+    const baseDecision = snap?.decision ?? root;
+    const baseSeq = snap?.seq ?? 0;
+
+    async function loadEventsAfterSeq(afterSeq: number) {
+      if (store.listEventsAfter) return store.listEventsAfter(input.decision_id, afterSeq);
+      const all = await store.listEvents(input.decision_id);
+      return all.filter((r) => r.seq > afterSeq);
+    }
+
+    async function replayFromBase(): Promise<StoreApplyResult> {
+      const recs = await loadEventsAfterSeq(baseSeq);
+      const events = recs.map((r) => r.event);
+      const rr = replayDecision(baseDecision, events, opts);
+
+      if (!rr.ok) return { ok: false, decision: rr.decision, violations: rr.violations };
+      await store.putDecision(rr.decision);
+      return { ok: true, decision: rr.decision, warnings: rr.warnings };
+    }
+
+    // 2) idempotency shortcut if store supports lookup
+>>>>>>> origin/main
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
         input.decision_id,
         input.idempotency_key
       );
       if (existing) {
+<<<<<<< HEAD
         const toPersist = bindDecisionId(headDecision, input.decision_id);
         await store.putDecision(toPersist);
         return {
@@ -519,6 +560,10 @@ export async function applyEventWithStore(
           warnings: headWarnings,
           consequence_preview,
         };
+=======
+        // Event already appended previously → just materialize from base (snapshot/root)
+        return replayFromBase();
+>>>>>>> origin/main
       }
     }
 
@@ -608,6 +653,7 @@ export async function applyEventWithStore(
       idempotency_key: input.idempotency_key,
     });
 
+<<<<<<< HEAD
     // ✅ Feature 11-x: ledger emit (only after successful apply preview)
     await emitLedger(
       store,
@@ -747,6 +793,10 @@ export async function applyEventWithStore(
     }
 
         return { ok: true, decision: toPersist, warnings: rrPreview.warnings, consequence_preview };
+=======
+    // 4) replay -> materialize current (from snapshot/root)
+    return replayFromBase();
+>>>>>>> origin/main
   });
 }
 
