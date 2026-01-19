@@ -21,6 +21,11 @@ import type {
 } from "./anchors.js";
 import { computeAnchorHash } from "./anchors.js";
 
+import type { LedgerEntry, LedgerEntryType, LedgerQuery, LedgerVerifyReport} from "./ledger.js";
+import { computeLedgerEntryHash, signLedgerHash,verifyLedgerEntries } from "./ledger.js";
+import type { LedgerSigner, LedgerVerifier } from "./ledger-signing.js";
+import type { VerifyLedgerOptions } from "./ledger-store.js";
+
 // ---------------------------------
 // Feature 17: hash-chain utilities
 // ---------------------------------
@@ -210,6 +215,43 @@ export class SqliteDecisionStore
     this.ensureColumn("decision_anchors", "state_hash", "TEXT");
     this.ensureColumn("decision_anchors", "prev_hash", "TEXT");
     this.ensureColumn("decision_anchors", "hash", "TEXT");
+
+    // ✅ CRITICAL: backfill hash-chains for existing rows (old DBs)
+    this.backfillAllEventHashChains();
+
+
+    // ledger (global append-only)
+      this.db.exec(`
+        CREATE TABLE IF NOT EXISTS enterprise_ledger (
+          seq INTEGER PRIMARY KEY,
+          at TEXT NOT NULL,
+          tenant_id TEXT,
+          type TEXT NOT NULL,
+          decision_id TEXT,
+          event_seq INTEGER,
+          snapshot_up_to_seq INTEGER,
+          anchor_seq INTEGER,
+          payload_json TEXT,
+          prev_hash TEXT,
+          hash TEXT NOT NULL,
+
+          sig_alg TEXT,
+          key_id TEXT,
+          sig TEXT
+        );
+      `);
+
+      this.db.exec(`
+        CREATE INDEX IF NOT EXISTS idx_enterprise_ledger_decision
+        ON enterprise_ledger (decision_id, seq);
+      `);
+
+      // migrations for older DBs
+      this.ensureColumn("enterprise_ledger", "sig_alg", "TEXT");
+      this.ensureColumn("enterprise_ledger", "key_id", "TEXT");
+      this.ensureColumn("enterprise_ledger", "sig", "TEXT");
+
+
   }
 
   private ensureColumn(table: string, column: string, type: string) {
@@ -218,6 +260,86 @@ export class SqliteDecisionStore
       .all() as Array<{ name: string }>;
     const has = rows.some((r) => r.name === column);
     if (!has) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${type};`);
+  }
+
+  // -----------------------------
+  // ✅ Feature 9/17: Backfill event hash-chain for existing DB rows
+  // Why: if older events were inserted with hash=null, verification can never pass.
+  // -----------------------------
+  private backfillAllEventHashChains(): void {
+    // quick check: if there are no missing hashes, do nothing
+    const missingRow = this.db
+      .prepare(
+        `SELECT 1 AS x
+         FROM decision_events
+         WHERE hash IS NULL OR hash='' OR prev_hash IS NULL
+         LIMIT 1;`
+      )
+      .get() as { x: 1 } | undefined;
+
+    if (!missingRow) return;
+
+    this.db.exec("BEGIN");
+    try {
+      const ids = this.db
+        .prepare(
+          `SELECT DISTINCT decision_id
+           FROM decision_events
+           ORDER BY decision_id ASC;`
+        )
+        .all() as Array<{ decision_id: string }>;
+
+      for (const r of ids) {
+        this.backfillEventChainForDecision(r.decision_id);
+      }
+
+      this.db.exec("COMMIT");
+    } catch (e) {
+      try {
+        this.db.exec("ROLLBACK");
+      } catch {}
+      throw e;
+    }
+  }
+
+  private backfillEventChainForDecision(decision_id: string): void {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, at, event_json, idempotency_key
+         FROM decision_events
+         WHERE decision_id=?
+         ORDER BY seq ASC;`
+      )
+      .all(decision_id) as Array<{
+      seq: number;
+      at: string;
+      event_json: string;
+      idempotency_key: string | null;
+    }>;
+
+    if (rows.length === 0) return;
+
+    const upd = this.db.prepare(
+      `UPDATE decision_events SET prev_hash=?, hash=? WHERE decision_id=? AND seq=?;`
+    );
+
+    let prev_hash: string | null = null;
+
+    for (const row of rows) {
+      const event = JSON.parse(row.event_json) as DecisionEvent;
+
+      const hash = computeEventHash({
+        decision_id,
+        seq: row.seq,
+        at: row.at,
+        idempotency_key: row.idempotency_key ?? null,
+        event,
+        prev_hash,
+      });
+
+      upd.run(prev_hash, hash, decision_id, row.seq);
+      prev_hash = hash;
+    }
   }
 
   // -----------------------------
@@ -261,39 +383,61 @@ export class SqliteDecisionStore
   // decisions
   // -----------------------------
   async createDecision(decision: Decision): Promise<void> {
-    const root_id = decision.parent_decision_id ?? decision.decision_id;
+  const decision_id =
+    typeof (decision as any).decision_id === "string" &&
+    (decision as any).decision_id.trim().length > 0
+      ? String((decision as any).decision_id)
+      : null;
 
-    this.db
-      .prepare(
-        `INSERT OR IGNORE INTO decisions (decision_id, root_id, version, decision_json)
-         VALUES (?, ?, ?, ?);`
-      )
-      .run(
-        decision.decision_id,
-        root_id,
-        decision.version ?? 1,
-        JSON.stringify(decision)
-      );
+  if (!decision_id) {
+    throw new Error("SQLITE_STORE_CREATE_DECISION: decision.decision_id is missing");
+  }
+
+  const parent_id =
+    typeof (decision as any).parent_decision_id === "string" &&
+    (decision as any).parent_decision_id.trim().length > 0
+      ? String((decision as any).parent_decision_id)
+      : null;
+
+  const root_id = parent_id ?? decision_id;
+
+  this.db
+    .prepare(
+      `INSERT OR IGNORE INTO decisions (decision_id, root_id, version, decision_json)
+       VALUES (?, ?, ?, ?);`
+    )
+    .run(decision_id, root_id, Number((decision as any).version ?? 1), JSON.stringify(decision));
   }
 
   async putDecision(decision: Decision): Promise<void> {
-    const root_id = decision.parent_decision_id ?? decision.decision_id;
+  const decision_id =
+    typeof (decision as any).decision_id === "string" &&
+    (decision as any).decision_id.trim().length > 0
+      ? String((decision as any).decision_id)
+      : null;
 
-    this.db
-      .prepare(
-        `INSERT INTO decisions (decision_id, root_id, version, decision_json)
-         VALUES (?, ?, ?, ?)
-         ON CONFLICT(decision_id) DO UPDATE SET
-           root_id=excluded.root_id,
-           version=excluded.version,
-           decision_json=excluded.decision_json;`
-      )
-      .run(
-        decision.decision_id,
-        root_id,
-        decision.version ?? 1,
-        JSON.stringify(decision)
-      );
+  if (!decision_id) {
+    throw new Error("SQLITE_STORE_PUT_DECISION: decision.decision_id is missing");
+  }
+
+  const parent_id =
+    typeof (decision as any).parent_decision_id === "string" &&
+    (decision as any).parent_decision_id.trim().length > 0
+      ? String((decision as any).parent_decision_id)
+      : null;
+
+  const root_id = parent_id ?? decision_id;
+
+  this.db
+    .prepare(
+      `INSERT INTO decisions (decision_id, root_id, version, decision_json)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(decision_id) DO UPDATE SET
+         root_id=excluded.root_id,
+         version=excluded.version,
+         decision_json=excluded.decision_json;`
+    )
+    .run(decision_id, root_id, Number((decision as any).version ?? 1), JSON.stringify(decision));
   }
 
   async getDecision(decision_id: string): Promise<Decision | null> {
@@ -524,7 +668,10 @@ export class SqliteDecisionStore
       const idempotency_key = input.idempotency_key ?? null;
 
       if (idempotency_key) {
-        const existing = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
+        const existing = await this.findEventByIdempotencyKey(
+          decision_id,
+          idempotency_key
+        );
         if (existing) return existing;
       }
 
@@ -566,7 +713,10 @@ export class SqliteDecisionStore
           );
       } catch (e: any) {
         if (idempotency_key && String(e?.message ?? "").includes("UNIQUE")) {
-          const existing2 = await this.findEventByIdempotencyKey(decision_id, idempotency_key);
+          const existing2 = await this.findEventByIdempotencyKey(
+            decision_id,
+            idempotency_key
+          );
           if (existing2) return existing2;
         }
         throw e;
@@ -906,7 +1056,10 @@ export class SqliteDecisionStore
       const decision_id = input.decision_id;
       const snapshot_up_to_seq = input.snapshot_up_to_seq;
 
-      const existing = await this.getAnchorForSnapshot(decision_id, snapshot_up_to_seq);
+      const existing = await this.getAnchorForSnapshot(
+        decision_id,
+        snapshot_up_to_seq
+      );
       if (existing) return existing;
 
       const row = this.db
@@ -949,7 +1102,10 @@ export class SqliteDecisionStore
           );
       } catch (e: any) {
         if (String(e?.message ?? "").includes("UNIQUE")) {
-          const existing2 = await this.getAnchorForSnapshot(decision_id, snapshot_up_to_seq);
+          const existing2 = await this.getAnchorForSnapshot(
+            decision_id,
+            snapshot_up_to_seq
+          );
           if (existing2) return existing2;
         }
         throw e;
@@ -1084,5 +1240,322 @@ export class SqliteDecisionStore
       return { deleted: before - after, remaining: after };
     });
   }
-}
 
+
+    // ---------------------------------
+  // ✅ Feature 9: Forensic verification API
+  // The example script likely expects store.verifyHashChain()
+  // ---------------------------------
+  async verifyHashChain(decision_id: string): Promise<{
+    verified: boolean;
+    errors: Array<{
+      seq: number;
+      code: string;
+      message: string;
+      expected?: string | null;
+      actual?: string | null;
+    }>;
+  }> {
+    const rows = this.db
+      .prepare(
+        `SELECT seq, at, event_json, idempotency_key, prev_hash, hash
+         FROM decision_events
+         WHERE decision_id=?
+         ORDER BY seq ASC;`
+      )
+      .all(decision_id) as Array<{
+      seq: number;
+      at: string;
+      event_json: string;
+      idempotency_key: string | null;
+      prev_hash: string | null;
+      hash: string | null;
+    }>;
+
+    const errors: Array<{
+      seq: number;
+      code: string;
+      message: string;
+      expected?: string | null;
+      actual?: string | null;
+    }> = [];
+
+    let prev: string | null = null;
+
+    for (const r of rows) {
+      const event = JSON.parse(r.event_json) as DecisionEvent;
+
+      // 1) prev_hash must match previous computed/stored hash
+      const expectedPrev = prev;
+      const actualPrev = r.prev_hash ?? null;
+
+      if (actualPrev !== expectedPrev) {
+        errors.push({
+          seq: r.seq,
+          code: "PREV_HASH_MISMATCH",
+          message: "prev_hash does not match previous event hash",
+          expected: expectedPrev,
+          actual: actualPrev,
+        });
+      }
+
+      // 2) hash must exist
+      if (!r.hash) {
+        errors.push({
+          seq: r.seq,
+          code: "MISSING_HASH",
+          message: "event hash is missing (null/empty)",
+          expected: null,
+          actual: r.hash ?? null,
+        });
+        // even if missing, continue computing expected chain so we can report more issues
+      }
+
+      // 3) recompute hash and compare
+      const expectedHash = computeEventHash({
+        decision_id,
+        seq: r.seq,
+        at: r.at,
+        idempotency_key: r.idempotency_key ?? null,
+        event,
+        prev_hash: expectedPrev,
+      });
+
+      const actualHash = r.hash ?? null;
+
+      if (actualHash !== expectedHash) {
+        errors.push({
+          seq: r.seq,
+          code: "HASH_MISMATCH",
+          message: "event hash does not match recomputed hash",
+          expected: expectedHash,
+          actual: actualHash,
+        });
+      }
+
+      // advance chain with the expected hash (canonical)
+      prev = expectedHash;
+    }
+
+    return { verified: errors.length === 0, errors };
+  }
+
+
+
+    // -----------------------------
+    // Feature 11-x: Enterprise Ledger (tenant-aware + export + verify + signing)
+    // 11-3: optional signature enforcement policy (OFF by default)
+    // 11-4: verifierRegistry support (optional)
+    // 11-5: trust summary comes from verifyLedgerEntries (ledger.ts)
+    // -----------------------------
+
+    // 11-3 (optional): set policy if you want to enforce signatures for some/all entry types
+    private enterpriseLedgerPolicy: {
+      require_signatures?: boolean;
+      require_signatures_for_types?: LedgerEntryType[];
+    } = {};
+
+    public setEnterpriseLedgerPolicy(p: {
+      require_signatures?: boolean;
+      require_signatures_for_types?: LedgerEntryType[];
+    }) {
+      this.enterpriseLedgerPolicy = { ...p };
+    }
+
+    private signatureRequiredForEnterpriseType(type: LedgerEntryType): boolean {
+      const requireAll = this.enterpriseLedgerPolicy.require_signatures === true;
+      const requireFor = new Set(this.enterpriseLedgerPolicy.require_signatures_for_types ?? []);
+      return requireAll || requireFor.has(type);
+    }
+
+    private getLastLedgerHash(): string | null {
+      const row = this.db
+        .prepare(`SELECT hash FROM enterprise_ledger ORDER BY seq DESC LIMIT 1;`)
+        .get() as { hash: string | null } | undefined;
+      return row?.hash ?? null;
+    }
+
+    async appendLedgerEntry(
+      input: Omit<LedgerEntry, "seq" | "prev_hash" | "hash" | "sig_alg" | "key_id" | "sig"> & {
+        signer?: LedgerSigner;
+      }
+    ): Promise<LedgerEntry> {
+      return this.runInTransaction(async () => {
+        // ✅ 11-3: enforce if policy says so (default OFF)
+        if (this.signatureRequiredForEnterpriseType(input.type as LedgerEntryType) && !input.signer) {
+          throw new Error(
+            `LEDGER_SIGNATURE_REQUIRED: type=${input.type} requires signer but signer was not provided`
+          );
+        }
+
+        const row = this.db
+          .prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM enterprise_ledger;`)
+          .get() as { max_seq: number };
+
+        const seq = (row?.max_seq ?? 0) + 1;
+        const prev_hash = this.getLastLedgerHash();
+
+        const entryBase: Omit<LedgerEntry, "hash"> = {
+          seq,
+          at: input.at,
+          tenant_id: input.tenant_id ?? null,
+          type: input.type as LedgerEntryType,
+
+          decision_id: input.decision_id ?? null,
+          event_seq: input.event_seq ?? null,
+          snapshot_up_to_seq: input.snapshot_up_to_seq ?? null,
+          anchor_seq: input.anchor_seq ?? null,
+
+          payload: input.payload ?? null,
+          prev_hash,
+
+          // signature fields computed after hash
+          sig_alg: null,
+          key_id: null,
+          sig: null,
+        };
+
+        const hash = computeLedgerEntryHash({
+          seq: entryBase.seq,
+          at: entryBase.at,
+          tenant_id: entryBase.tenant_id,
+          type: entryBase.type as any,
+          decision_id: entryBase.decision_id,
+          event_seq: entryBase.event_seq,
+          snapshot_up_to_seq: entryBase.snapshot_up_to_seq,
+          anchor_seq: entryBase.anchor_seq,
+          payload: entryBase.payload,
+          prev_hash: entryBase.prev_hash,
+        });
+
+        // ✅ sign AFTER hash is computed
+        const sigParts = signLedgerHash(hash, input.signer);
+
+        this.db
+          .prepare(
+            `INSERT INTO enterprise_ledger
+              (seq, at, tenant_id, type, decision_id, event_seq, snapshot_up_to_seq, anchor_seq,
+              payload_json, prev_hash, hash, sig_alg, key_id, sig)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);`
+          )
+          .run(
+            seq,
+            entryBase.at,
+            entryBase.tenant_id ?? null,
+            entryBase.type,
+            entryBase.decision_id ?? null,
+            entryBase.event_seq ?? null,
+            entryBase.snapshot_up_to_seq ?? null,
+            entryBase.anchor_seq ?? null,
+            JSON.stringify(entryBase.payload ?? null),
+            prev_hash,
+            hash,
+            sigParts.sig_alg,
+            sigParts.key_id,
+            sigParts.sig
+          );
+
+        return {
+          ...entryBase,
+          hash,
+          sig_alg: sigParts.sig_alg,
+          key_id: sigParts.key_id,
+          sig: sigParts.sig,
+        };
+      });
+    }
+
+    // Backward compatible overloads:
+    // - listLedgerEntries(200)
+    // - listLedgerEntries({ tenant_id: "TENANT_A", limit: 50 })
+    async listLedgerEntries(limit: number): Promise<LedgerEntry[]>;
+    async listLedgerEntries(query?: LedgerQuery): Promise<LedgerEntry[]>;
+    async listLedgerEntries(arg: any = {}): Promise<LedgerEntry[]> {
+      const query: LedgerQuery =
+        typeof arg === "number" ? { limit: arg } : (arg ?? {});
+
+      const limit = Math.max(1, Math.floor(query.limit ?? 200));
+
+      const rows = query.tenant_id
+        ? (this.db
+            .prepare(
+              `SELECT seq, at, tenant_id, type, decision_id, event_seq, snapshot_up_to_seq, anchor_seq,
+                      payload_json, prev_hash, hash, sig_alg, key_id, sig
+              FROM enterprise_ledger
+              WHERE tenant_id=?
+              ORDER BY seq ASC
+              LIMIT ?;`
+            )
+            .all(query.tenant_id, limit) as any[])
+        : (this.db
+            .prepare(
+              `SELECT seq, at, tenant_id, type, decision_id, event_seq, snapshot_up_to_seq, anchor_seq,
+                      payload_json, prev_hash, hash, sig_alg, key_id, sig
+              FROM enterprise_ledger
+              ORDER BY seq ASC
+              LIMIT ?;`
+            )
+            .all(limit) as any[]);
+
+      return rows.map((r) => ({
+        seq: Number(r.seq),
+        at: String(r.at),
+        tenant_id: r.tenant_id ?? null,
+        type: String(r.type) as LedgerEntryType,
+        decision_id: r.decision_id ?? null,
+        event_seq: r.event_seq == null ? null : Number(r.event_seq),
+        snapshot_up_to_seq: r.snapshot_up_to_seq == null ? null : Number(r.snapshot_up_to_seq),
+        anchor_seq: r.anchor_seq == null ? null : Number(r.anchor_seq),
+        payload: r.payload_json ? JSON.parse(String(r.payload_json)) : null,
+        prev_hash: r.prev_hash ?? null,
+        hash: String(r.hash),
+        sig_alg: (r.sig_alg ?? null) as any,
+        key_id: r.key_id ?? null,
+        sig: r.sig ?? null,
+      }));
+    }
+
+    async exportLedgerRange(input: { from_seq: number; to_seq: number }): Promise<LedgerEntry[]> {
+      const from = Math.floor(input.from_seq);
+      const to = Math.floor(input.to_seq);
+      if (from <= 0 || to < from) return [];
+
+      const rows = this.db
+        .prepare(
+          `SELECT seq, at, tenant_id, type, decision_id, event_seq, snapshot_up_to_seq, anchor_seq,
+                  payload_json, prev_hash, hash, sig_alg, key_id, sig
+          FROM enterprise_ledger
+          WHERE seq BETWEEN ? AND ?
+          ORDER BY seq ASC;`
+        )
+        .all(from, to) as any[];
+
+      return rows.map((r) => ({
+        seq: Number(r.seq),
+        at: String(r.at),
+        tenant_id: r.tenant_id ?? null,
+        type: String(r.type) as LedgerEntryType,
+        decision_id: r.decision_id ?? null,
+        event_seq: r.event_seq == null ? null : Number(r.event_seq),
+        snapshot_up_to_seq: r.snapshot_up_to_seq == null ? null : Number(r.snapshot_up_to_seq),
+        anchor_seq: r.anchor_seq == null ? null : Number(r.anchor_seq),
+        payload: r.payload_json ? JSON.parse(String(r.payload_json)) : null,
+        prev_hash: r.prev_hash ?? null,
+        hash: String(r.hash),
+        sig_alg: (r.sig_alg ?? null) as any,
+        key_id: r.key_id ?? null,
+        sig: r.sig ?? null,
+      }));
+    }
+
+    async verifyLedger(opts: VerifyLedgerOptions = {}): Promise<LedgerVerifyReport> {
+      const entries = await this.listLedgerEntries({ limit: 1_000_000 });
+      return verifyLedgerEntries(entries, {
+        require_signatures: opts.require_signatures ?? false,
+        resolveVerifier: opts.resolveVerifier,
+        verifierRegistry: (opts as any).verifierRegistry, // ✅ 11-4 (optional)
+      });
+    }
+
+
+}

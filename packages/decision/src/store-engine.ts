@@ -2,10 +2,11 @@
 import { createDecisionV2 } from "./decision.js";
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
-import type { DecisionEngineOptions } from "./engine.js";
-import { replayDecision } from "./engine.js";
+import type { DecisionEngineOptions } from "./engine";
+import { replayDecision } from "./engine";
 import type { PolicyViolation } from "./policy.js";
 import type { DecisionEventRecord, DecisionStore } from "./store.js";
+import { applyDecisionEvent } from "./engine";
 import type {
   DecisionSnapshotStore,
   SnapshotPolicy,
@@ -20,6 +21,36 @@ import crypto from "node:crypto";
 
 import { computeConsequencePreview } from "./consequence-preview.js";
 
+import {
+  evaluateApprovalGates,
+  type ApprovalGatePolicy,
+  type GateDecisionContext,
+} from "./approval-gates.js";
+
+import {
+  evaluateComplianceConstraints,
+  type CompliancePolicy,
+  type ComplianceContext,
+} from "./compliance-constraints.js";
+
+import {
+  enforceImmutabilityWindow,
+  type ImmutabilityPolicy,
+} from "./immutability.js";
+
+// ✅ Feature 8: External attestation
+import type { Attestor } from "./attestation.js";
+import {
+  buildDecisionAttestationPayload,
+  computePayloadHash,
+} from "./attestation.js";
+
+// ✅ Feature 11-x: ledger store + signer types (optional, no hard dependency)
+import type { DecisionLedgerStore } from "./ledger-store.js";
+import type { LedgerSigner } from "./ledger-signing.js";
+
+
+
 // -----------------------------
 // small utils
 // -----------------------------
@@ -29,7 +60,6 @@ function nowIso(opts: DecisionEngineOptions): string {
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
-
   const norm = (v: any): any => {
     if (v === null) return null;
     if (typeof v !== "object") return v;
@@ -47,7 +77,6 @@ function stableStringify(value: unknown): string {
     }
     return out;
   };
-
   return JSON.stringify(norm(value));
 }
 
@@ -59,6 +88,14 @@ function computeStateHash(decision: unknown): string {
   return sha256Hex(stableStringify(decision));
 }
 
+function getMeta(obj: any): any {
+  return obj && typeof obj === "object" ? obj : null;
+}
+
+function isApprovalLike(event: DecisionEvent): boolean {
+  return event.type === "APPROVE" || event.type === "REJECT";
+}
+
 async function loadDeltaEvents(
   store: DecisionStore,
   decision_id: string,
@@ -67,6 +104,103 @@ async function loadDeltaEvents(
   if (store.listEventsFrom) return store.listEventsFrom(decision_id, after_seq);
   const all = await store.listEvents(decision_id);
   return all.filter((r) => r.seq > after_seq);
+}
+
+/**
+ * If store root is actually the head, rebuild canonical DRAFT root for replay.
+ */
+function canonicalDraftRootFromStored(root: Decision): Decision {
+  const created_at = root.created_at ?? new Date().toISOString();
+  const nowFn = () => created_at;
+
+  const d = createDecisionV2(
+    {
+      decision_id: root.decision_id,
+      meta: root.meta ?? {},
+      artifacts: root.artifacts ?? {},
+      version: 1,
+    } as any,
+    nowFn
+  );
+
+  return { ...d, state: "DRAFT", created_at, updated_at: created_at };
+}
+
+/**
+ * allow_locked_event_types is an ENGINE concern.
+ * We derive it from immutabilityPolicy.allow_event_types if present.
+ */
+function lockedAllowlistFromInput(input: {
+  immutabilityPolicy?: ImmutabilityPolicy;
+}): Array<DecisionEvent["type"]> {
+  const allow = input.immutabilityPolicy?.allow_event_types as
+    | Array<DecisionEvent["type"]>
+    | undefined;
+
+  // Default: allow evidence + ingestion + external attestation after lock
+  return allow ?? ["ATTACH_ARTIFACTS", "INGEST_RECORDS", "ATTEST_EXTERNAL"];
+}
+
+function bindDecisionId(d: Decision, decision_id: string): Decision {
+  const anyD: any = d as any;
+  if (anyD && typeof anyD.decision_id === "string" && anyD.decision_id.length) return d;
+  return { ...(d as any), decision_id } as any;
+}
+
+
+// -----------------------------
+// ✅ Feature 11-x: ledger emit helper
+// - prefers input.ledgerStore if provided
+// - otherwise falls back to store.appendLedgerEntry if present
+// -----------------------------
+async function emitLedger(
+  store: DecisionStore,
+  input: {
+    ledgerStore?: DecisionLedgerStore;
+    ledgerSigner?: LedgerSigner;
+    tenant_id?: string | null;
+  },
+  entry: {
+    at: string;
+    type: "DECISION_EVENT_APPENDED" | "SNAPSHOT_CREATED" | "ANCHOR_APPENDED";
+    decision_id: string | null;
+    event_seq?: number | null;
+    snapshot_up_to_seq?: number | null;
+    anchor_seq?: number | null;
+    payload: any;
+  }
+): Promise<void> {
+  const ledger = input.ledgerStore;
+  if (ledger && typeof ledger.appendLedgerEntry === "function") {
+    await ledger.appendLedgerEntry({
+      at: entry.at,
+      tenant_id: input.tenant_id ?? null,
+      type: entry.type,
+      decision_id: entry.decision_id ?? null,
+      event_seq: entry.event_seq ?? null,
+      snapshot_up_to_seq: entry.snapshot_up_to_seq ?? null,
+      anchor_seq: entry.anchor_seq ?? null,
+      payload: entry.payload ?? null,
+      signer: input.ledgerSigner,
+    } as any);
+    return;
+  }
+
+  // Back-compat: some users wire ledger directly onto DecisionStore (older MVP)
+  const anyStore = store as any;
+  if (typeof anyStore.appendLedgerEntry === "function") {
+    await anyStore.appendLedgerEntry({
+      at: entry.at,
+      tenant_id: input.tenant_id ?? null,
+      type: entry.type,
+      decision_id: entry.decision_id ?? null,
+      event_seq: entry.event_seq ?? null,
+      snapshot_up_to_seq: entry.snapshot_up_to_seq ?? null,
+      anchor_seq: entry.anchor_seq ?? null,
+      payload: entry.payload ?? null,
+      signer: input.ledgerSigner,
+    });
+  }
 }
 
 // -----------------------------
@@ -103,15 +237,58 @@ export async function applyEventWithStore(
     snapshotPolicy?: SnapshotPolicy;
     snapshotRetentionPolicy?: SnapshotRetentionPolicy;
 
-    // anchors
     anchorStore?: DecisionAnchorStore;
     anchorPolicy?: AnchorPolicy;
 
-    // optional anchor retention
     anchorRetentionPolicy?: { keep_last_n_anchors: number };
 
-    // optional behavior
-    block_on_consequence_block?: boolean; // default false
+    block_on_consequence_block?: boolean;
+
+    gatePolicy?: ApprovalGatePolicy;
+    gateContext?: GateDecisionContext;
+
+    require_signer_identity_binding?: boolean;
+
+    compliancePolicy?: CompliancePolicy;
+    complianceContext?: ComplianceContext;
+
+    immutabilityPolicy?: ImmutabilityPolicy;
+
+    // ✅ Feature 8
+    attestor?: Attestor;
+
+    // ✅ Feature 11-x (tenant + signed ledger)
+    tenant_id?: string | null;
+    ledgerStore?: DecisionLedgerStore;
+    ledgerSigner?: LedgerSigner;
+
+
+
+
+    // ✅ Feature 12 (optional)
+    responsibility?: {
+      owner_id: string;
+      owner_role?: string | null;
+      org_id?: string | null;
+      valid_from?: string | null;
+      valid_to?: string | null;
+    };
+
+    approver?: {
+      approver_id: string;
+      approver_role?: string | null;
+    };
+
+    impact?: {
+      estimated_cost?: number | null;
+      currency?: string | null;
+      risk_score?: number | null;
+      regulatory_exposure?: "LOW" | "MEDIUM" | "HIGH" | null;
+      notes?: string | null;
+    };
+
+
+
   },
   opts: DecisionEngineOptions = {}
 ): Promise<StoreApplyResult> {
@@ -120,13 +297,28 @@ export async function applyEventWithStore(
     : async <T>(fn: () => Promise<T>) => fn();
 
   return run(async () => {
-    // 1) ensure root exists (create if missing)
-    let root = await store.getRootDecision(input.decision_id);
-    if (!root) {
+        // 1) ensure decision exists (create if missing)
+    const rootMaybe = await store.getRootDecision(input.decision_id);
+
+    let root: Decision;
+    if (rootMaybe) {
+      root = rootMaybe;
+    } else {
+      const nowFn = opts.now ?? (() => new Date().toISOString());
+
       root = createDecisionV2(
-        { decision_id: input.decision_id, meta: input.metaIfCreate ?? {} },
-        opts.now
-      );
+        {
+          decision_id: input.decision_id,
+          meta: input.metaIfCreate ?? {},
+          artifacts: {},
+          version: 1,
+        } as any,
+        nowFn
+      ) as any;
+
+      // belt-and-suspenders
+      root = { ...root, decision_id: input.decision_id } as any;
+
       await store.createDecision(root);
       await store.putDecision(root);
     }
@@ -136,14 +328,21 @@ export async function applyEventWithStore(
       ? await input.snapshotStore.getLatestSnapshot(input.decision_id)
       : null;
 
-    const baseDecision = (snapshot as any)?.decision ?? root;
-    const baseSeq = (snapshot as any)?.up_to_seq ?? 0;
+    // base for replay
+    const baseDecision = snapshot
+      ? ((snapshot as any).decision as Decision)
+      : canonicalDraftRootFromStored(root);
 
-    // 3) compute "current head" decision (before new event)
+    const baseSeq = snapshot ? ((snapshot as any).up_to_seq ?? 0) : 0;
+
+    // 3) compute current head
     const deltaBefore = await loadDeltaEvents(store, input.decision_id, baseSeq);
-    const rrBefore = replayDecision(baseDecision, deltaBefore.map((r) => r.event), opts);
+    const rrBefore = replayDecision(
+      baseDecision,
+      deltaBefore.map((r) => r.event),
+      { ...opts, allow_locked_event_types: lockedAllowlistFromInput(input) }
+    );
 
-    // ✅ TS-safe narrowing (fixes the red lines)
     if (rrBefore.ok === false) {
       return {
         ok: false,
@@ -155,13 +354,29 @@ export async function applyEventWithStore(
     const headDecision = rrBefore.decision;
     const headWarnings = rrBefore.warnings;
 
-    // ✅ consequence preview should use the REAL current state
     const consequence_preview = computeConsequencePreview({
       decision: headDecision ?? null,
       event: input.event,
     });
 
-    // 0) optimistic lock (after we know current head)
+    // ✅ Feature 5
+    const imm = enforceImmutabilityWindow({
+      policy: input.immutabilityPolicy,
+      decision: headDecision,
+      event: input.event,
+      nowIso: nowIso(opts),
+    });
+
+    if (!imm.ok) {
+      return {
+        ok: false,
+        decision: headDecision,
+        violations: imm.violations,
+        consequence_preview,
+      };
+    }
+
+    // 0) optimistic lock
     if (typeof input.expected_current_version === "number") {
       const curVer =
         (await store.getCurrentVersion?.(input.decision_id)) ??
@@ -170,7 +385,6 @@ export async function applyEventWithStore(
 
       if (curVer !== input.expected_current_version) {
         const d = (await store.getDecision(input.decision_id)) ?? headDecision ?? root;
-
         return {
           ok: false,
           decision: d,
@@ -181,6 +395,91 @@ export async function applyEventWithStore(
               message: `Expected version ${input.expected_current_version} but current is ${curVer ?? "null"}.`,
             },
           ],
+          consequence_preview,
+        };
+      }
+    }
+
+    // ✅ Feature 2
+    if (input.gatePolicy) {
+      const gate = evaluateApprovalGates({
+        policy: input.gatePolicy,
+        decision: headDecision,
+        event: input.event,
+        ctx: input.gateContext,
+      });
+
+      if (!gate.ok) {
+        return {
+          ok: false,
+          decision: headDecision,
+          violations: gate.violations,
+          consequence_preview,
+        };
+      }
+    }
+
+    // ✅ Feature 3
+    if (input.require_signer_identity_binding === true && isApprovalLike(input.event)) {
+      const meta = getMeta((input.event as any)?.meta) ?? {};
+      const signer_id = typeof meta.signer_id === "string" ? meta.signer_id : null;
+      const signer_state_hash =
+        typeof meta.signer_state_hash === "string" ? meta.signer_state_hash : null;
+
+      const persistedHead = (await store.getDecision(input.decision_id)) ?? headDecision;
+      const expected_state_hash = computeStateHash(persistedHead);
+
+      const violations: PolicyViolation[] = [];
+
+      if (!signer_id) {
+        violations.push({
+          code: "SIGNER_ID_REQUIRED",
+          severity: "BLOCK",
+          message: "Signer identity binding required: meta.signer_id is missing.",
+        });
+      }
+
+      if (!signer_state_hash) {
+        violations.push({
+          code: "SIGNER_STATE_HASH_REQUIRED",
+          severity: "BLOCK",
+          message: "Signer identity binding required: meta.signer_state_hash is missing.",
+        });
+      } else if (signer_state_hash !== expected_state_hash) {
+        violations.push({
+          code: "SIGNER_STATE_HASH_MISMATCH",
+          severity: "BLOCK",
+          message: "Signer identity binding failed: state hash does not match current decision state.",
+        });
+      }
+
+      if (signer_id && signer_id !== (input.event as any).actor_id) {
+        violations.push({
+          code: "SIGNER_ACTOR_MISMATCH",
+          severity: "BLOCK",
+          message: "Signer identity binding failed: signer_id must match actor_id.",
+        });
+      }
+
+      if (violations.length) {
+        return { ok: false, decision: headDecision, violations, consequence_preview };
+      }
+    }
+
+    // ✅ Feature 4
+    if (input.compliancePolicy) {
+      const cr = evaluateComplianceConstraints({
+        policy: input.compliancePolicy,
+        decision: headDecision,
+        event: input.event,
+        ctx: input.complianceContext,
+      });
+
+      if (!cr.ok) {
+        return {
+          ok: false,
+          decision: headDecision,
+          violations: cr.violations,
           consequence_preview,
         };
       }
@@ -205,72 +504,176 @@ export async function applyEventWithStore(
       };
     }
 
-    // 4) idempotency shortcut
+    // idempotency shortcut
     if (input.idempotency_key && store.findEventByIdempotencyKey) {
       const existing = await store.findEventByIdempotencyKey(
         input.decision_id,
         input.idempotency_key
       );
-
       if (existing) {
-        // event already persisted; return current head
-        await store.putDecision(headDecision);
+        const toPersist = bindDecisionId(headDecision, input.decision_id);
+        await store.putDecision(toPersist);
         return {
           ok: true,
-          decision: headDecision,
+          decision: toPersist,
           warnings: headWarnings,
           consequence_preview,
         };
       }
     }
 
-    // 5) append event
-    await store.appendEvent(input.decision_id, {
-      at: nowIso(opts),
-      event: input.event,
-      idempotency_key: input.idempotency_key,
-    });
+    // ✅ Feature 8: enrich ATTEST_EXTERNAL event with payload+receipt
+    let eventToAppend: DecisionEvent = input.event;
 
-    // 6) replay delta (base -> all events up to now)
-    const deltaAfter = await loadDeltaEvents(store, input.decision_id, baseSeq);
-    const rr = replayDecision(baseDecision, deltaAfter.map((r) => r.event), opts);
+    if (input.attestor && input.event.type === "ATTEST_EXTERNAL") {
+      const state_hash = computeStateHash(headDecision);
 
-    if (rr.ok === false) {
+      const target =
+        typeof (input.event as any).target === "string"
+          ? ((input.event as any).target as "DECISION_STATE" | "SNAPSHOT" | "ANCHOR")
+          : "DECISION_STATE";
+
+      const snapshot_up_to_seq =
+        typeof (input.event as any).snapshot_up_to_seq === "number"
+          ? (input.event as any).snapshot_up_to_seq
+          : undefined;
+
+      const tags =
+        (input.event as any).tags && typeof (input.event as any).tags === "object"
+          ? ((input.event as any).tags as Record<string, string>)
+          : undefined;
+
+      const payload = buildDecisionAttestationPayload({
+        decision: headDecision,
+        state_hash,
+        attested_at: nowIso(opts),
+        target,
+        snapshot_up_to_seq,
+        tags,
+      });
+
+      const receipt = await input.attestor.attest(payload);
+
+      const expected_payload_hash = computePayloadHash(payload);
+      if (receipt.payload_hash && receipt.payload_hash !== expected_payload_hash) {
+        return {
+          ok: false,
+          decision: headDecision,
+          violations: [
+            {
+              code: "ATTESTATION_PAYLOAD_HASH_MISMATCH",
+              severity: "BLOCK",
+              message: "Attestation receipt payload_hash does not match expected payload hash.",
+              details: {
+                expected: expected_payload_hash,
+                provided: receipt.payload_hash,
+              } as any,
+            },
+          ],
+          consequence_preview,
+        };
+      }
+
+      eventToAppend = {
+        ...(input.event as any),
+        meta: {
+          ...(((input.event as any).meta ?? {}) as any),
+          payload,
+          receipt,
+        },
+      } as any;
+    }
+
+    // ✅ PREVIEW APPLY (DO NOT PERSIST EVENT YET)
+    // If this fails, we must NOT append the event to the store.
+    const rrPreview = replayDecision(
+      baseDecision,
+      [...deltaBefore.map((r) => r.event), eventToAppend],
+      { ...opts, allow_locked_event_types: lockedAllowlistFromInput(input) }
+    );
+
+    if (rrPreview.ok === false) {
       return {
         ok: false,
-        decision: rr.decision,
-        violations: rr.violations,
+        decision: rrPreview.decision,
+        violations: rrPreview.violations,
         consequence_preview,
       };
     }
 
-    await store.putDecision(rr.decision);
+    // ✅ NOW it's safe to persist the event
+    const appended = await store.appendEvent(input.decision_id, {
+      at: nowIso(opts),
+      event: eventToAppend,
+      idempotency_key: input.idempotency_key,
+    });
 
-    // 7) snapshot + retention + anchors (optional)
+    // ✅ Feature 11-x: ledger emit (only after successful apply preview)
+    await emitLedger(
+      store,
+      { ledgerStore: input.ledgerStore, ledgerSigner: input.ledgerSigner, tenant_id: input.tenant_id ?? null },
+      {
+        at: nowIso(opts),
+        type: "DECISION_EVENT_APPENDED",
+        decision_id: input.decision_id,
+        event_seq: appended.seq,
+        payload: {
+          event_type: eventToAppend.type,
+          idempotency_key: input.idempotency_key ?? null,
+          responsibility: input.responsibility ?? null,
+          approver: input.approver ?? null,
+          impact: input.impact ?? null,
+        },
+      }
+    );
+
+    // Persist the decision computed by the preview replay
+    const toPersist = bindDecisionId(rrPreview.decision, input.decision_id);
+    await store.putDecision(toPersist);
+
+    // snapshots + anchors unchanged (but ledger emission upgraded)
     if (input.snapshotStore && input.snapshotPolicy) {
-      const lastSeq = deltaAfter.length ? deltaAfter[deltaAfter.length - 1]!.seq : baseSeq;
+      const lastSeq = appended.seq;
       const lastSnapSeq = (snapshot as any)?.up_to_seq ?? 0;
 
       if (shouldCreateSnapshot(input.snapshotPolicy, lastSeq, lastSnapSeq)) {
-        const lastRec = deltaAfter.length ? deltaAfter[deltaAfter.length - 1]! : null;
+        const lastRec: any = appended ?? null;
         const checkpoint_hash =
           lastRec && (lastRec as any).hash ? String((lastRec as any).hash) : null;
 
-        // create snapshot
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
           up_to_seq: lastSeq,
-          decision: rr.decision,
+          decision: rrPreview.decision,
           created_at: nowIso(opts),
           checkpoint_hash,
-          state_hash: computeStateHash(rr.decision),
+          state_hash: computeStateHash(rrPreview.decision),
         } as any);
 
-        // anchors (idempotent per snapshot)
+        // ledger: snapshot created
+        await emitLedger(
+          store,
+          { ledgerStore: input.ledgerStore, ledgerSigner: input.ledgerSigner, tenant_id: input.tenant_id ?? null },
+          {
+            at: nowIso(opts),
+            type: "SNAPSHOT_CREATED",
+            decision_id: input.decision_id,
+            snapshot_up_to_seq: lastSeq,
+            payload: {
+              checkpoint_hash,
+              sstate_hash: computeStateHash(rrPreview.decision),
+
+              // ✅ Feature 12 metadata
+              responsibility: input.responsibility ?? null,
+              approver: input.approver ?? null,
+              impact: input.impact ?? null,
+            },
+          }
+        );
+
         const anchorEnabled = input.anchorPolicy?.enabled ?? true;
         if (anchorEnabled && input.anchorStore) {
           const latest = await input.snapshotStore.getLatestSnapshot(input.decision_id);
-
           if (latest) {
             const aStore: any = input.anchorStore;
 
@@ -282,17 +685,37 @@ export async function applyEventWithStore(
                   : null;
 
             if (!already) {
-              await input.anchorStore.appendAnchor({
+              const anchorRec = await input.anchorStore.appendAnchor({
                 at: nowIso(opts),
                 decision_id: input.decision_id,
                 snapshot_up_to_seq: (latest as any).up_to_seq,
                 checkpoint_hash: (latest as any).checkpoint_hash ?? null,
                 root_hash: (latest as any).root_hash ?? null,
-                state_hash: (latest as any).state_hash ?? computeStateHash(rr.decision),
+                state_hash: (latest as any).state_hash ?? computeStateHash(rrPreview.decision),
               } as any);
+
+              // ledger: anchor appended
+              await emitLedger(
+                store,
+                { ledgerStore: input.ledgerStore, ledgerSigner: input.ledgerSigner, tenant_id: input.tenant_id ?? null },
+                {
+                  at: nowIso(opts),
+                  type: "ANCHOR_APPENDED",
+                  decision_id: input.decision_id,
+                  snapshot_up_to_seq: (latest as any).up_to_seq,
+                  anchor_seq: (anchorRec as any)?.seq ?? null,
+                  payload: {
+                    state_hash: (latest as any).state_hash ?? null,
+
+                    // ✅ Feature 12 metadata
+                    responsibility: input.responsibility ?? null,
+                    approver: input.approver ?? null,
+                    impact: input.impact ?? null,
+                  },
+                }
+              );
             }
 
-            // optional anchor retention
             const keepN = input.anchorRetentionPolicy?.keep_last_n_anchors;
             if (typeof keepN === "number" && typeof aStore.pruneAnchors === "function") {
               await aStore.pruneAnchors(keepN);
@@ -300,7 +723,6 @@ export async function applyEventWithStore(
           }
         }
 
-        // snapshot retention pass
         if (input.snapshotRetentionPolicy) {
           const keepLast = input.snapshotRetentionPolicy.keep_last_n_snapshots;
 
@@ -324,13 +746,7 @@ export async function applyEventWithStore(
       }
     }
 
-    return {
-      ok: true,
-      decision: rr.decision,
-      warnings: rr.warnings,
-      consequence_preview,
-    };
+        return { ok: true, decision: toPersist, warnings: rrPreview.warnings, consequence_preview };
   });
 }
-
 

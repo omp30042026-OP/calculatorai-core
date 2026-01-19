@@ -70,3 +70,8 @@ export type { DecisionAnchorStore, DecisionAnchorRecord, AnchorPolicy } from "./
 export { verifyGlobalAnchorChain } from "./store-verify-anchors.js";
 
 export * from "./consequence-preview.js";
+
+export * from "./approval-gates.js";
+
+export * from "./compliance-constraints.js";
+

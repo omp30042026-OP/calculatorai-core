@@ -1,6 +1,12 @@
 // packages/decision/src/state-machine.ts
 
-import type { DecisionState } from "./decision.js";
+export type DecisionState =
+  | "DRAFT"
+  | "VALIDATED"
+  | "SIMULATED"
+  | "EXPLAINED"
+  | "APPROVED"
+  | "REJECTED";
 
 export type DecisionEventType =
   | "VALIDATE"
@@ -9,48 +15,107 @@ export type DecisionEventType =
   | "APPROVE"
   | "REJECT"
   | "ATTACH_ARTIFACTS"
-  | "SIGN"; // ✅ Feature 16
+  | "SIGN"
+  | "INGEST_RECORDS"
+  | "LINK_DECISIONS"
+  | "ATTEST_EXTERNAL"
+  | "ENTER_DISPUTE"
+  | "EXIT_DISPUTE"
+  // ✅ Feature 13: execution guarantees
+  | "ADD_OBLIGATION"
+  | "FULFILL_OBLIGATION"
+  | "WAIVE_OBLIGATION"
+  | "ATTEST_EXECUTION"
+  | "SET_RISK"
+  | "ADD_BLAST_RADIUS"
+  | "ADD_IMPACTED_SYSTEM"
+  | "SET_ROLLBACK_PLAN";
 
-export function transitionDecisionState(
-  current: DecisionState,
-  eventType: DecisionEventType
-): DecisionState {
-  // ✅ Events that should NOT change state
-  if (eventType === "ATTACH_ARTIFACTS" || eventType === "SIGN") return current;
+   
 
-  switch (current) {
-    case "DRAFT": {
-      if (eventType === "VALIDATE") return "VALIDATED";
-      return current;
-    }
+/**
+ * Events that should NOT change DecisionState.
+ * (They can still mutate artifacts/history/accountability.)
+ */
+export type NoStateChangeEventType =
+  | "ATTACH_ARTIFACTS"
+  | "SIGN"
+  | "INGEST_RECORDS"
+  | "LINK_DECISIONS"
+  | "ATTEST_EXTERNAL"
+  | "ENTER_DISPUTE"
+  | "EXIT_DISPUTE"
+  // ✅ Feature 13
+  | "ADD_OBLIGATION"
+  | "FULFILL_OBLIGATION"
+  | "WAIVE_OBLIGATION"
+  | "ATTEST_EXECUTION";
 
-    case "VALIDATED": {
-      if (eventType === "SIMULATE") return "SIMULATED";
-      if (eventType === "EXPLAIN") return "EXPLAINED";
-      if (eventType === "APPROVE") return "APPROVED";
-      if (eventType === "REJECT") return "REJECTED";
-      return current;
-    }
-
-    case "SIMULATED": {
-      if (eventType === "EXPLAIN") return "EXPLAINED";
-      if (eventType === "APPROVE") return "APPROVED";
-      if (eventType === "REJECT") return "REJECTED";
-      return current;
-    }
-
-    case "EXPLAINED": {
-      if (eventType === "APPROVE") return "APPROVED";
-      if (eventType === "REJECT") return "REJECTED";
-      return current;
-    }
-
-    case "APPROVED":
-    case "REJECTED":
-      return current;
-
+export function isNoStateChangeEvent(
+  t: DecisionEventType
+): t is NoStateChangeEventType {
+  switch (t) {
+    case "ATTACH_ARTIFACTS":
+    case "SIGN":
+    case "INGEST_RECORDS":
+    case "LINK_DECISIONS":
+    case "ATTEST_EXTERNAL":
+    case "ENTER_DISPUTE":
+    case "EXIT_DISPUTE":
+    case "ADD_OBLIGATION":
+    case "FULFILL_OBLIGATION":
+    case "WAIVE_OBLIGATION":
+    case "ATTEST_EXECUTION":
+      return true;
     default:
-      return current;
+      return false;
   }
 }
+
+export function transitionDecisionState(
+  state: DecisionState,
+  eventType: DecisionEventType
+): DecisionState {
+  if (isNoStateChangeEvent(eventType)) return state;
+
+  switch (eventType) {
+    case "VALIDATE": {
+      if (state === "APPROVED" || state === "REJECTED") return state;
+      return "VALIDATED";
+    }
+    case "SIMULATE": {
+      if (state === "APPROVED" || state === "REJECTED") return state;
+      return "SIMULATED";
+    }
+    case "EXPLAIN": {
+      if (state === "APPROVED" || state === "REJECTED") return state;
+      return "EXPLAINED";
+    }
+    case "APPROVE": {
+      if (state === "REJECTED") return state;
+      return "APPROVED";
+    }
+    case "REJECT": {
+      return "REJECTED";
+    }
+    case "SET_RISK":
+    case "ADD_BLAST_RADIUS":
+    case "ADD_IMPACTED_SYSTEM":
+    case "SET_ROLLBACK_PLAN":
+      return state; // or return current state (no state change)
+    default: {
+      const _exhaustive: never = eventType;
+      return state;
+    }
+  }
+}
+
+
+
+
+
+
+
+
+
 

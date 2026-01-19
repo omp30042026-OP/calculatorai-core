@@ -135,9 +135,11 @@ export async function verifySnapshotIsAnchored(
     seq: anchor.seq,
     at: anchor.at,
     decision_id: anchor.decision_id,
+
     snapshot_up_to_seq: anchor.snapshot_up_to_seq,
     checkpoint_hash: anchor.checkpoint_hash ?? null,
     root_hash: anchor.root_hash ?? null,
+    state_hash: (anchor as any).state_hash ?? null, // ✅ include if present
     prev_hash: anchor.prev_hash ?? null,
   });
 

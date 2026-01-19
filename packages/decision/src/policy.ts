@@ -1,13 +1,17 @@
+// packages/decision/src/policy.ts
 import type { Decision } from "./decision.js";
 import type { DecisionEvent } from "./events.js";
+import { ensureExecutionArtifacts, evaluateExecution } from "./obligations.js";
 
 export type PolicySeverity = "WARN" | "BLOCK";
 
 export type PolicyViolation = {
   code: string;
+  severity: "INFO" | "WARN" | "BLOCK";
   message: string;
-  severity: PolicySeverity;
-  meta?: Record<string, unknown>;
+
+  // ✅ allow structured evidence (audit-friendly)
+  details?: Record<string, unknown>;
 };
 
 export type PolicyResult =
@@ -20,7 +24,11 @@ export type DecisionPolicy = (ctx: {
 }) => PolicyResult;
 
 export function defaultPolicies(): DecisionPolicy[] {
-  return [requireMetaOnValidatePolicy()];
+  return [
+    requireMetaOnValidatePolicy(),
+    // ✅ Feature 13.4/13.5
+    slaEnforcementPolicy({ block_on: "APPROVE" }), // recommended: block at approval time
+  ];
 }
 
 /**
@@ -47,13 +55,68 @@ function requireMetaOnValidatePolicy(): DecisionPolicy {
         {
           code: "MISSING_REQUIRED_FIELDS",
           severity: "BLOCK",
-          message: `Cannot VALIDATE: missing required meta fields: ${missing.join(
-            ", "
-          )}.`,
-          meta: { missing },
+          message: `Cannot VALIDATE: missing required meta fields: ${missing.join(", ")}.`,
+          details: { missing },
         },
       ],
     };
   };
 }
+
+/**
+ * ✅ Feature 13.4 SLA enforcement + 13.5 automatic violations
+ *
+ * - Always computes breaches (based on now + due_at + grace)
+ * - Recommended behavior: only BLOCK on APPROVE (so users can keep adding evidence)
+ * - You can change to block_on: "ANY_EVENT" if you want hard enforcement always.
+ */
+export function slaEnforcementPolicy(opts?: {
+  block_on?: "APPROVE" | "ANY_EVENT";
+}): DecisionPolicy {
+  const blockOn = opts?.block_on ?? "APPROVE";
+
+  return ({ decision, event }) => {
+    const artifactsAny: any = decision.artifacts ?? {};
+    const exec = ensureExecutionArtifacts(artifactsAny);
+
+    // no obligations -> no SLA enforcement
+    if (!exec.obligations || exec.obligations.length === 0) return { ok: true };
+
+    const nowIso = decision.updated_at ?? new Date().toISOString();
+    const { breached } = evaluateExecution(exec, nowIso);
+
+    if (!breached.length) return { ok: true };
+
+    // automatic violations list
+    const violations: PolicyViolation[] = breached.map((o) => ({
+      code: "OBLIGATION_BREACHED",
+      severity: (o.severity ?? "WARN") as any,
+      message: `Obligation breached: ${o.title} (${o.obligation_id}).`,
+      details: {
+        obligation_id: o.obligation_id,
+        title: o.title,
+        due_at: o.due_at ?? null,
+        grace_seconds: o.grace_seconds ?? 0,
+        status: o.status,
+        owner_id: o.owner_id ?? null,
+      },
+    }));
+
+    // Decide whether to block this event
+    const shouldBlock =
+      blockOn === "ANY_EVENT" ||
+      (blockOn === "APPROVE" && event.type === "APPROVE");
+
+    if (!shouldBlock) {
+      // If not blocking, downgrade BLOCK severity to WARN so it doesn't stop workflow.
+      const softened = violations.map((v) =>
+        v.severity === "BLOCK" ? { ...v, severity: "WARN" as const } : v
+      );
+      return { ok: false, violations: softened };
+    }
+
+    return { ok: false, violations };
+  };
+}
+
 

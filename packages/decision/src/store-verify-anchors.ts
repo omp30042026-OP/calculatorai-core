@@ -72,9 +72,11 @@ export async function verifyGlobalAnchorChain(
       seq: a.seq,
       at: a.at,
       decision_id: a.decision_id,
+
       snapshot_up_to_seq: a.snapshot_up_to_seq,
       checkpoint_hash: a.checkpoint_hash ?? null,
       root_hash: a.root_hash ?? null,
+      state_hash: (a as any).state_hash ?? null, // ✅ include if present
       prev_hash: prevHash,
     });
 

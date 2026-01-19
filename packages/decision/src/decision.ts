@@ -24,12 +24,56 @@ export const DecisionHistoryEntrySchema = z.object({
 });
 export type DecisionHistoryEntry = z.infer<typeof DecisionHistoryEntrySchema>;
 
+// ✅ Feature 13 schemas (stored inside artifacts.execution)
+const ObligationLiteSchema = z.object({
+  obligation_id: z.string(),
+  title: z.string(),
+  description: z.string().nullable().optional(),
+  owner_id: z.string().nullable().optional(),
+  created_at: z.string().optional(),
+  due_at: z.string().nullable().optional(),
+  grace_seconds: z.number().int().nonnegative().optional(),
+  severity: z.enum(["INFO", "WARN", "BLOCK"]).optional(),
+  status: z.enum(["OPEN", "FULFILLED", "WAIVED", "BREACHED"]).optional(),
+  fulfilled_at: z.string().nullable().optional(),
+  waived_at: z.string().nullable().optional(),
+  waived_reason: z.string().nullable().optional(),
+  proof: z
+    .object({
+      type: z.string().nullable().optional(),
+      ref: z.string().nullable().optional(),
+      payload_hash: z.string().nullable().optional(),
+      meta: z.record(z.string(), z.unknown()).nullable().optional(),
+    })
+    .optional(),
+  tags: z.record(z.string(), z.string()).optional(),
+});
+
+const ExecutionAttestationLiteSchema = z.object({
+  at: z.string(),
+  actor_id: z.string().nullable().optional(),
+  provider: z.string().nullable().optional(),
+  attestation_id: z.string().nullable().optional(),
+  payload_hash: z.string().nullable().optional(),
+  url: z.string().nullable().optional(),
+  meta: z.record(z.string(), z.unknown()).nullable().optional(),
+});
+
 export const DecisionArtifactsSchema = z
   .object({
     explain_tree_id: z.string().optional(),
     margin_snapshot_id: z.string().optional(),
     risk_report_id: z.string().optional(),
     extra: z.record(z.string(), z.unknown()).optional(),
+
+    // ✅ Feature 13: execution guarantees (optional)
+    execution: z
+      .object({
+        obligations: z.array(ObligationLiteSchema).optional(),
+        attestations: z.array(ExecutionAttestationLiteSchema).optional(),
+        last_evaluated_at: z.string().nullable().optional(),
+      })
+      .optional(),
   })
   .default({});
 export type DecisionArtifacts = z.infer<typeof DecisionArtifactsSchema>;
@@ -91,23 +135,11 @@ export type DecisionRisk = z.infer<typeof DecisionRiskSchema>;
 export const DecisionSignatureSchema = z.object({
   at: z.string(), // ISO timestamp
   signer_id: z.string(),
-
-  // optional role/human meaning
   role: z.string().nullable().default(null),
-
-  // how it was signed
   method: z.enum(["HMAC", "ED25519", "RSA", "EIP191", "CUSTOM"]).default("CUSTOM"),
-
-  // what the signature covers (hash of canonical payload)
   payload_hash: z.string(),
-
-  // proof material
   signature: z.string(),
-
-  // key identifier or reference (optional)
   key_id: z.string().nullable().default(null),
-
-  // extra metadata (optional)
   meta: z.record(z.string(), z.unknown()).nullable().default(null),
 });
 export type DecisionSignature = z.infer<typeof DecisionSignatureSchema>;
@@ -125,13 +157,8 @@ export const DecisionSchema = z.object({
   meta: z.record(z.string(), z.unknown()).default({}),
   artifacts: DecisionArtifactsSchema,
 
-  // ✅ Feature 14
   accountability: DecisionAccountabilitySchema.optional(),
-
-  // ✅ Feature 15
   risk: DecisionRiskSchema,
-
-  // ✅ Feature 16
   signatures: z.array(DecisionSignatureSchema).default([]),
 
   history: z.array(DecisionHistoryEntrySchema).default([]),
@@ -149,12 +176,10 @@ export type CreateDecisionInput = {
     margin_snapshot_id?: string;
     risk_report_id?: string;
     extra?: Record<string, unknown>;
+    execution?: any;
   };
 
-  // ✅ Feature 15 (optional seed)
   risk?: Partial<DecisionRisk>;
-
-  // ✅ Feature 16 (optional seed)
   signatures?: DecisionSignature[];
 };
 
@@ -182,21 +207,17 @@ export function createDecisionV2(
     meta: input.meta ?? {},
     artifacts: input.artifacts ?? {},
 
-    // ✅ Feature 15: seed risk; schema fills the rest via defaults
     risk: {
       owner_id: ownerFromMeta,
       ...(input.risk ?? {}),
     } as any,
 
-    // ✅ Feature 16: seed signatures (usually empty on create)
     signatures: input.signatures ?? [],
-
     history: [],
   };
 
   const parsed = DecisionSchema.parse(d);
-
-  // ✅ Feature 14: ensure default accountability object exists
   return ensureAccountability(parsed) as Decision;
 }
+
 
