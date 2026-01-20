@@ -129,7 +129,8 @@ function normalizeBag(input: any): ProvenanceBag {
 export function getProvenanceBag(decision: Decision): ProvenanceBag {
   const a: any = (decision as any)?.artifacts ?? {};
   const extra: any = a?.extra ?? {};
-  return normalizeBag(a.provenance ?? extra.provenance);
+  // ✅ canonical-first
+  return normalizeBag(extra.provenance ?? a.provenance);
 }
 
 export function setProvenanceBag(decision: Decision, bag: ProvenanceBag): Decision {
@@ -284,7 +285,14 @@ export function applyProvenanceTransition(input: {
     null;
 
   // ✅ event_hash from input.event is fine, but use history meta if you want.
-  const event_hash = computeEventHash(input.event);
+  // Use the same fields you recorded into history (deterministic under replay)
+    const event_hash = computeEventHash({
+    type: event_type,
+    actor_id,
+    // include meta/reason if you want them to affect provenance identity
+    meta: lastHistory?.meta ?? null,
+    reason: (lastHistory as any)?.reason ?? null,
+    });
 
   const nodePayloadForId = {
     decision_id,

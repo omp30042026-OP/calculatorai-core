@@ -232,6 +232,41 @@ export const SetRollbackPlanEventSchema = BaseEventSchema.extend({
   rollback_owner_id: z.string().nullable().optional(),
 });
 
+
+// -----------------------------
+// ✅ Feature 15: Personal Liability Shield (PLS) events
+// -----------------------------
+export const AssignResponsibilityEventSchema = BaseEventSchema.extend({
+  type: z.literal("ASSIGN_RESPONSIBILITY"),
+  responsibility: z.object({
+    owner_id: z.string(),
+    owner_role: z.string().optional(),
+    org_id: z.string().optional(),
+    scope: z.string().optional(), // optional “what I own”
+    valid_from: z.string().optional(), // ISO
+    valid_to: z.string().optional(),   // ISO
+    notes: z.string().optional(),
+  }),
+});
+
+export const AcceptRiskEventSchema = BaseEventSchema.extend({
+  type: z.literal("ACCEPT_RISK"),
+  acceptance: z.object({
+    accepted_by: z.string(),
+    accepted_role: z.string().optional(),
+    org_id: z.string().optional(),
+    rationale: z.string().optional(),
+    ticket: z.string().optional(),
+    expires_at: z.string().optional(), // ISO
+    // binds acceptance to a specific state
+    signer_state_hash: z.string().optional(),
+  }),
+});
+
+
+
+
+
 // -----------------------------
 // Union
 // -----------------------------
@@ -262,6 +297,10 @@ export const DecisionEventSchema = z.union([
   AddBlastRadiusEventSchema,
   AddImpactedSystemEventSchema,
   SetRollbackPlanEventSchema,
+
+  // ✅ Feature 15: Personal Liability Shield
+  AssignResponsibilityEventSchema,
+  AcceptRiskEventSchema,
 ]);
 
 

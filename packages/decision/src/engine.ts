@@ -51,7 +51,7 @@ function getExecBag(decision: Decision): ExecBag {
 
   // Prefer canonical location first: artifacts.execution
   // Fallback to legacy/compat: artifacts.extra.execution
-  return normalizeExecBag(a.execution ?? extra.execution);
+  return normalizeExecBag(extra.execution ?? a.execution);
 }
 
 function cloneExecBag(bag: ExecBag): ExecBag {
@@ -80,6 +80,67 @@ function setExecBag(decision: Decision, bag: ExecBag): Decision {
     },
   } as any;
 }
+
+// -----------------------------
+// ✅ Feature 15: Personal Liability Shield (PLS) storage
+// Canonical-first: artifacts.extra.pls (and compat mirror artifacts.pls)
+// -----------------------------
+type PLSBag = {
+  responsibility?: {
+    owner_id: string;
+    owner_role?: string | null;
+    org_id?: string | null;
+    scope?: string | null;
+    valid_from?: string | null;
+    valid_to?: string | null;
+    notes?: string | null;
+    assigned_at?: string | null;
+    assigned_by?: string | null;
+  } | null;
+
+  risk_acceptance?: {
+    accepted_by: string;
+    accepted_role?: string | null;
+    org_id?: string | null;
+    rationale?: string | null;
+    ticket?: string | null;
+    expires_at?: string | null;
+    signer_state_hash?: string | null;
+    accepted_at?: string | null;
+  } | null;
+};
+
+function normalizePLSBag(input: any): PLSBag {
+  const bag = input && typeof input === "object" ? input : {};
+  return {
+    responsibility: bag.responsibility ?? null,
+    risk_acceptance: bag.risk_acceptance ?? null,
+  };
+}
+
+function getPLSBag(decision: Decision): PLSBag {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  return normalizePLSBag(extra.pls ?? a.pls);
+}
+
+function setPLSBag(decision: Decision, bag: PLSBag): Decision {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+
+  const compat = JSON.parse(JSON.stringify(bag));
+  const canon = JSON.parse(JSON.stringify(bag));
+
+  return {
+    ...decision,
+    artifacts: {
+      ...a,
+      pls: compat,
+      extra: { ...extra, pls: canon },
+    },
+  } as any;
+}
+
 
 function hasOpenBlockViolation(violations: any[]): boolean {
   return violations.some((v) => v?.severity === "BLOCK" && !v?.resolved_at);
@@ -184,6 +245,8 @@ function getLockedAllowlist(opts: DecisionEngineOptions): Set<AnyEventType> {
     "ADD_BLAST_RADIUS",
     "ADD_IMPACTED_SYSTEM",
     "SET_ROLLBACK_PLAN",
+    "ASSIGN_RESPONSIBILITY",
+    "ACCEPT_RISK",
   ]) as AnyEventType[];
 
   return new Set<AnyEventType>([
@@ -215,7 +278,9 @@ function allowedInDispute(eventType: AnyEventType): boolean {
     eventType === "SET_RISK" ||
     eventType === "ADD_BLAST_RADIUS" ||
     eventType === "ADD_IMPACTED_SYSTEM" ||
-    eventType === "SET_ROLLBACK_PLAN" 
+    eventType === "SET_ROLLBACK_PLAN"||
+    eventType === "ASSIGN_RESPONSIBILITY" ||
+    eventType === "ACCEPT_RISK" 
   );
 }
 
@@ -429,6 +494,8 @@ export function applyDecisionEvent(
     "ADD_BLAST_RADIUS",
     "ADD_IMPACTED_SYSTEM",
     "SET_ROLLBACK_PLAN",
+    "ASSIGN_RESPONSIBILITY",
+    "ACCEPT_RISK",
   ];
 
   const isArtifactOnly = t === "ATTACH_ARTIFACTS" || noStateChange || FEATURE13_NO_STATE.includes(t);
@@ -503,8 +570,56 @@ export function applyDecisionEvent(
 
   const withDispute = applyDisputeArtifacts(nextBase, event, now());
 
-  // ✅ Feature 15: Risk Ownership + Blast Radius mutations (no state change)
-  let withRisk: Decision = withDispute;
+  // ✅ Feature 15: PLS mutations (no state change)
+  let withPLS: Decision = withDispute;
+  let pls = getPLSBag(withPLS);
+  withPLS = setPLSBag(withPLS, pls); // ensure canonical location exists
+
+  if (t === "ASSIGN_RESPONSIBILITY") {
+    const e: any = e0;
+    const r = e?.responsibility ?? null;
+    if (r && typeof r === "object") {
+      pls = normalizePLSBag({
+        ...pls,
+        responsibility: {
+          owner_id: String(r.owner_id),
+          owner_role: r.owner_role != null ? String(r.owner_role) : null,
+          org_id: r.org_id != null ? String(r.org_id) : null,
+          scope: r.scope != null ? String(r.scope) : null,
+          valid_from: r.valid_from != null ? String(r.valid_from) : null,
+          valid_to: r.valid_to != null ? String(r.valid_to) : null,
+          notes: r.notes != null ? String(r.notes) : null,
+          assigned_at: isoToSecond(now()),
+          assigned_by: (event as any)?.actor_id ?? null,
+        },
+      });
+      withPLS = setPLSBag(withPLS, pls);
+    }
+  }
+
+  if (t === "ACCEPT_RISK") {
+    const e: any = e0;
+    const a = e?.acceptance ?? null;
+    if (a && typeof a === "object") {
+      pls = normalizePLSBag({
+        ...pls,
+        risk_acceptance: {
+          accepted_by: String(a.accepted_by),
+          accepted_role: a.accepted_role != null ? String(a.accepted_role) : null,
+          org_id: a.org_id != null ? String(a.org_id) : null,
+          rationale: a.rationale != null ? String(a.rationale) : null,
+          ticket: a.ticket != null ? String(a.ticket) : null,
+          expires_at: a.expires_at != null ? String(a.expires_at) : null,
+          signer_state_hash: a.signer_state_hash != null ? String(a.signer_state_hash) : null,
+          accepted_at: isoToSecond(now()),
+        },
+      });
+      withPLS = setPLSBag(withPLS, pls);
+    }
+  }
+
+  // Continue existing logic from withRisk using withPLS as base:
+  let withRisk: Decision = withPLS;
 
   if (t === "SET_RISK") {
     const e: any = e0;

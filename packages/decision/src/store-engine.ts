@@ -49,7 +49,11 @@ import {
 import type { DecisionLedgerStore } from "./ledger-store.js";
 import type { LedgerSigner } from "./ledger-signing.js";
 
-
+import {
+  applyProvenanceTransition,
+  verifyProvenanceChain,
+  migrateProvenanceChain,
+} from "./provenance.js";
 
 // -----------------------------
 // small utils
@@ -248,6 +252,7 @@ export async function applyEventWithStore(
     gateContext?: GateDecisionContext;
 
     require_signer_identity_binding?: boolean;
+    require_liability_shield?: boolean;
 
     compliancePolicy?: CompliancePolicy;
     complianceContext?: ComplianceContext;
@@ -352,6 +357,7 @@ export async function applyEventWithStore(
     }
 
     const headDecision = rrBefore.decision;
+    const headDecisionMigrated = migrateProvenanceChain(headDecision);
     const headWarnings = rrBefore.warnings;
 
     const consequence_preview = computeConsequencePreview({
@@ -485,6 +491,71 @@ export async function applyEventWithStore(
       }
     }
 
+    // ✅ Feature 15: Personal Liability Shield (PLS) enforcement
+    if (input.require_liability_shield === true && isApprovalLike(input.event)) {
+      const violations: PolicyViolation[] = [];
+
+      // Require responsibility + approver to be provided by the caller
+      if (!input.responsibility?.owner_id) {
+        violations.push({
+          code: "PLS_RESPONSIBILITY_REQUIRED",
+          severity: "BLOCK",
+          message: "Liability shield requires responsibility.owner_id.",
+        });
+      }
+
+      if (!input.approver?.approver_id) {
+        violations.push({
+          code: "PLS_APPROVER_REQUIRED",
+          severity: "BLOCK",
+          message: "Liability shield requires approver.approver_id.",
+        });
+      }
+
+      // Actor must match approver (prevents “someone else approved under my name”)
+      if (
+        input.approver?.approver_id &&
+        (input.event as any)?.actor_id &&
+        (input.event as any).actor_id !== input.approver.approver_id
+      ) {
+        violations.push({
+          code: "PLS_APPROVER_ACTOR_MISMATCH",
+          severity: "BLOCK",
+          message: "Liability shield requires event.actor_id to match approver.approver_id.",
+        });
+      }
+
+      // Require signer_state_hash binding to the CURRENT persisted decision state
+      const meta = getMeta((input.event as any)?.meta) ?? {};
+      const signer_state_hash =
+        typeof meta.signer_state_hash === "string" ? meta.signer_state_hash : null;
+
+      const persistedHead = (await store.getDecision(input.decision_id)) ?? headDecision;
+      const expected_state_hash = computeStateHash(persistedHead);
+
+      if (!signer_state_hash) {
+        violations.push({
+          code: "PLS_SIGNER_STATE_HASH_REQUIRED",
+          severity: "BLOCK",
+          message: "Liability shield requires meta.signer_state_hash.",
+        });
+      } else if (signer_state_hash !== expected_state_hash) {
+        violations.push({
+          code: "PLS_SIGNER_STATE_HASH_MISMATCH",
+          severity: "BLOCK",
+          message: "Liability shield failed: signer_state_hash does not match current decision state.",
+          details: { expected: expected_state_hash, provided: signer_state_hash } as any,
+        });
+      }
+
+      if (violations.length) {
+        return { ok: false, decision: headDecision, violations, consequence_preview };
+      }
+    }
+
+
+
+
     // optional: block if preview says BLOCK
     if (
       input.block_on_consequence_block === true &&
@@ -515,7 +586,7 @@ export async function applyEventWithStore(
         await store.putDecision(toPersist);
         return {
           ok: true,
-          decision: toPersist,
+          decision: headDecision,
           warnings: headWarnings,
           consequence_preview,
         };
@@ -601,6 +672,32 @@ export async function applyEventWithStore(
       };
     }
 
+    const withProv = applyProvenanceTransition({
+      before: headDecisionMigrated,
+      after: rrPreview.decision,
+      event: eventToAppend,
+      event_type: eventToAppend.type,
+      nowIso: nowIso(opts),
+    });
+
+    const provCheck = verifyProvenanceChain(withProv);
+    if (!provCheck.ok) {
+      return {
+        ok: false,
+        decision: withProv,
+        violations: [
+          {
+            code: provCheck.code,
+            severity: "BLOCK",
+            message: provCheck.message,
+            details: { index: (provCheck as any).index ?? null } as any,
+          },
+        ],
+        consequence_preview,
+      };
+    }
+        
+
     // ✅ NOW it's safe to persist the event
     const appended = await store.appendEvent(input.decision_id, {
       at: nowIso(opts),
@@ -628,7 +725,50 @@ export async function applyEventWithStore(
     );
 
     // Persist the decision computed by the preview replay
-    const toPersist = bindDecisionId(rrPreview.decision, input.decision_id);
+    // ✅ Feature 15: store liability shield binding in canonical artifacts.extra
+    const withPLS: Decision = {
+      ...(withProv as any),
+      artifacts: {
+        ...((withProv as any).artifacts ?? {}),
+        extra: {
+          ...(((withProv as any).artifacts?.extra ?? {}) as any),
+          liability_shield: {
+            at: nowIso(opts),
+            decision_id: input.decision_id,
+            event_type: eventToAppend.type,
+            event_seq: appended.seq,
+
+            responsibility: input.responsibility ?? null,
+            approver: input.approver ?? null,
+            impact: input.impact ?? null,
+
+            signer_state_hash:
+              (getMeta((eventToAppend as any)?.meta) ?? {})?.signer_state_hash ?? null,
+          },
+        },
+      },
+    };
+
+    const toPersist = bindDecisionId(withPLS, input.decision_id);
+
+    // optional safety check (cheap)
+    const provOk = verifyProvenanceChain(toPersist);
+    if (!provOk.ok) {
+      return {
+        ok: false,
+        decision: toPersist,
+        violations: [
+          {
+            code: "PROVENANCE_CHAIN_INVALID",
+            severity: "BLOCK",
+            message: provOk.message,
+            details: provOk as any,
+          },
+        ],
+        consequence_preview,
+      };
+    }
+
     await store.putDecision(toPersist);
 
     // snapshots + anchors unchanged (but ledger emission upgraded)
@@ -644,10 +784,11 @@ export async function applyEventWithStore(
         await input.snapshotStore.putSnapshot({
           decision_id: input.decision_id,
           up_to_seq: lastSeq,
-          decision: rrPreview.decision,
+          decision: toPersist,
           created_at: nowIso(opts),
           checkpoint_hash,
-          state_hash: computeStateHash(rrPreview.decision),
+          state_hash: computeStateHash(toPersist),
+          provenance_tail_hash: ((withProv as any)?.artifacts?.extra?.provenance?.last_node_hash ?? null),
         } as any);
 
         // ledger: snapshot created
@@ -661,7 +802,7 @@ export async function applyEventWithStore(
             snapshot_up_to_seq: lastSeq,
             payload: {
               checkpoint_hash,
-              sstate_hash: computeStateHash(rrPreview.decision),
+              state_hash: computeStateHash(toPersist),
 
               // ✅ Feature 12 metadata
               responsibility: input.responsibility ?? null,

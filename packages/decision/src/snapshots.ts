@@ -49,6 +49,22 @@ export type DecisionSnapshot = {
    * - null if any hashes are missing (cannot compute)
    */
   root_hash?: HexHash | null;
+
+
+  /**
+   * ✅ Feature 32: deterministic decision state hash (snapshot decision JSON)
+   */
+  state_hash?: HexHash | null;
+
+  /**
+   * ✅ Feature 14: provenance chain tail hash at this snapshot boundary.
+   * This lets us cryptographically bind "decision history up to seq" to its provenance chain.
+   */
+  provenance_tail_hash?: HexHash | null;
+
+
+
+
 };
 
 /**
@@ -95,8 +111,7 @@ export type DecisionSnapshotStore = {
     up_to_seq: number
   ): Promise<{ deleted: number }>;
 
-  // ✅ Feature 32: decision state attestation
-    state_hash?: string | null;
+  
 };
 
 /**

@@ -9,13 +9,11 @@
     "explain:multi": "tsx examples/run-explain-multi.ts > /dev/null",
     "effects": "tsx examples/assert-effects.ts",
     "golden": "tsx examples/verify-golden.ts",
-
     "decision:ok": "tsx examples/run-decision-engine.ts > /dev/null",
     "decision:blocked": "tsx examples/run-decision-engine-blocked.ts > /dev/null",
     "decision:required": "tsx examples/run-decision-engine-required-fields.ts > /dev/null",
     "decision:artifacts": "tsx examples/run-decision-engine-artifacts.ts > /dev/null",
     "decision:fork": "tsx examples/run-decision-engine-fork.ts > /dev/null",
-
     "decision:store": "tsx examples/run-decision-store-replay.ts > /dev/null",
     "decision:store:sqlite": "tsx examples/run-decision-store-sqlite.ts > /dev/null",
     "decision:snapshots:sqlite": "tsx examples/run-decision-snapshots-sqlite.ts > /dev/null",
@@ -33,10 +31,13 @@
     "decision:verify-lineage:sqlite": "tsx examples/run-decision-verify-lineage-sqlite.ts > /dev/null",
     "decision:anchored-snapshot:sqlite": "tsx examples/run-decision-verify-anchored-snapshot-sqlite.ts",
     "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:ui": "vitest --ui",
     "decision:provenance:tamper": "tsx examples/run-decision-provenance-tamper.ts > /dev/null",
     "decision:summary": "tsx examples/run-decision-summary.ts",
-
     "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite && npm run decision:snapshots:sqlite && npm run decision:durability:sqlite && npm run decision:retention:sqlite && npm run decision:history:sqlite && npm run decision:fork-history:sqlite && npm run decision:diff:sqlite && npm run decision:audit:sqlite && npm run decision:timeline:sqlite && npm run decision:fork-graph:sqlite && npm run decision:lineage:sqlite && npm run decision:observability:sqlite"
+    
   },
   "author": "",
   "license": "ISC",
@@ -46,10 +47,10 @@
     "ts-node": "^10.9.2",
     "tsx": "^4.21.0",
     "typescript": "^5.9.3",
+    "vitest": "^4.0.17",
     "zod": "^4.2.1"
   },
   "dependencies": {
     "better-sqlite3": "^12.5.0"
   }
 }
-
