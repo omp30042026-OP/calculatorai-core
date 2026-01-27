@@ -1,41 +1,26 @@
-node_modules/
-.DS_Store
-dist/
-build/
-*.log
-.env
-.env.*
-coverage/
-decision-store.sqlite
-decision-store.sqlite-wal
-decision-store.sqlite-shm
-*.sqlite
-*.sqlite-wal
-*.sqlite-shm
-
 # --- Decision engine generated artifacts ---
 *.db
 *.sqlite
-*.json
-
-# demo / scratch files
-a.json
-b.json
-current.json
-after_attach.json
-dag.json
-stored.json
-stored.pretty.json
-replayed.json
-federation-proof-bundle.json
-proof_dec_*.json
-
-# proof packs
-proof-pack/
 
 # runtime outputs
 replay-demo.db
 
-# local scripts
-hash-sweep.ts
+# proof / exports / scratch JSON (do NOT ignore all *.json)
+proof_*.json
+*_proof*.json
+federation-proof-bundle.json
+proof_dec_*.json
+stored.json
+stored.pretty.json
+replayed.json
+current.json
+after_attach.json
+dag.json
+a.json
+b.json
 
+# proof packs
+proof-pack/
+
+# local scripts / scratch
+hash-sweep.ts
