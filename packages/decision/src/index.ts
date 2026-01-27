@@ -83,3 +83,22 @@ export * from "./provenance-graph.js";
 export * from "./store-provenance-graph.js";
 
 export type { PlsShieldRecord } from "./store.js";
+
+
+export {
+  rewindDecisionWithStore,
+  replayCounterfactualWithStore,
+  type CounterfactualEdits,
+  type CounterfactualResult,
+  type RewindResult,
+} from "./store-engine.js";
+
+
+export {
+  persistCounterfactualBranchWithStore,
+} from "./store-engine.js";
+
+export type {
+  PersistCounterfactualBranchInput,
+  PersistCounterfactualBranchResult,
+} from "./store-engine.js";

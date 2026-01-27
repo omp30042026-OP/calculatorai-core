@@ -183,8 +183,8 @@ export type DecisionStore = {
 
   listRoles?: (
     decision_id: string,
-    actor_id?: string
-  ) => Promise<DecisionRoleRecord[]>;
+    actor_id: string
+  ) => Promise<string[]>;
 
   hasAnyRole?: (
     decision_id: string,
@@ -192,6 +192,9 @@ export type DecisionStore = {
     roles: string[]
   ) => Promise<boolean>;
 
+
+
+  
 
 
 

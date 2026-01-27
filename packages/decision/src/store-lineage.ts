@@ -13,21 +13,33 @@ export type ForkLineage = {
   edges: ForkEdge[];
 };
 
-function getParentIdFromDecisionMeta(d: any): string | null {
+function getParentIdFromDecision(d: any): string | null {
+  // ✅ Canonical first: top-level field
+  const direct =
+    typeof d?.parent_decision_id === "string" && d.parent_decision_id.trim().length
+      ? String(d.parent_decision_id).trim()
+      : null;
+
+  if (direct) return direct;
+
+  // Legacy fallback: meta keys
   const meta = d?.meta ?? {};
-  // accept a few common keys (keep it flexible)
-  return (
+  const legacy =
     meta.parent_decision_id ??
     meta.parentDecisionId ??
     meta.forked_from_decision_id ??
     meta.forkedFromDecisionId ??
-    null
-  );
+    null;
+
+  return typeof legacy === "string" && legacy.trim().length ? String(legacy).trim() : null;
 }
 
 /**
- * Builds a simple lineage graph by scanning a list of decision_ids and reading their root decision meta.
- * Works without needing a dedicated forks table.
+ * Builds a simple fork lineage graph by scanning decision_ids and reading each decision's ROOT decision fields.
+ * Canonical-first:
+ * - parent_decision_id (top-level)
+ * - legacy fallback: meta.parent_decision_id / meta.parentDecisionId / ...
+ * fork_from_seq / parent_seq (if present) currently lives in meta.
  */
 export async function buildForkLineage(
   store: DecisionStore,
@@ -47,7 +59,7 @@ export async function buildForkLineage(
     const root = await store.getRootDecision(id);
     if (!root) continue;
 
-    const parent = getParentIdFromDecisionMeta(root);
+    const parent = getParentIdFromDecision(root);
     if (parent) {
       edges.push({
         child_decision_id: id,

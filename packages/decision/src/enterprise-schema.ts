@@ -167,6 +167,26 @@ export function ensureEnterpriseTables(db: any) {
     ON pls_shields (shield_hash);
   `);
 
+
+
+  // decision_roles: RBAC mapping (decision_id x actor_id -> role)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS decision_roles(
+      decision_id TEXT NOT NULL,
+      actor_id    TEXT NOT NULL,
+      role        TEXT NOT NULL,
+      created_at  TEXT NOT NULL,
+      PRIMARY KEY(decision_id, actor_id, role)
+    );
+  `);
+
+  db.exec(`
+    CREATE INDEX IF NOT EXISTS idx_decision_roles_lookup
+    ON decision_roles(decision_id, actor_id);
+  `);
+
+
+
   // migrations for older DBs (safe no-op if columns exist)
   try {
     const cols = (db.prepare(`PRAGMA table_info(pls_shields);`).all() as any[]).map((r) => r.name);

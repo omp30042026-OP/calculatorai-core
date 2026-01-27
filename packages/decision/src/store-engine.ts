@@ -74,6 +74,9 @@ import {
 import { enforceTrustBoundary as enforceTrustBoundaryV2, type TrustBoundaryPolicy } from "./trust-boundary.js";
 
 
+import type { SignerDirectory } from "./signer-binding.js";
+import { verifySignerBindingAsync } from "./signer-binding.js";
+
 
 
 
@@ -369,11 +372,14 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
 
     return [];
   } catch (e) {
-    // If verification itself breaks, fail open (or change to fail closed if you want).
-    if (process.env.DEBUG_LIABILITY) {
-      console.error("❌ verifyRiskLiabilityIntegrityOrThrow failed", e);
-    }
-    return [];
+    return [
+      {
+        code: "LIABILITY_VERIFY_FAILED",
+        severity: "BLOCK",
+        message: "Liability integrity verification failed (unable to verify safely).",
+        details: { decision_id, error: String((e as any)?.message ?? e) } as any,
+      },
+    ];
   }
 }
 
@@ -661,8 +667,9 @@ function canonicalDraftRootFromStored(root: Decision): Decision {
   const d = createDecisionV2(
     {
       decision_id: root.decision_id,
+      parent_decision_id: (root as any).parent_decision_id ?? undefined, // ✅ ADD THIS
       meta: root.meta ?? {},
-      artifacts: {}, // <-- critical: empty artifacts so replay isn't double-applying derived state
+      artifacts: {}, // genesis clean
       version: 1,
     } as any,
     nowFn
@@ -830,6 +837,398 @@ async function emitLedger(
   }
 }
 
+
+// =====================================
+// ✅ Feature 16-C: Persist Counterfactual Branch (materialize what-if)
+// =====================================
+
+export type PersistCounterfactualBranchInput = {
+  // source (existing) decision
+  decision_id: string;
+
+  // new (branch) decision id to create
+  new_decision_id: string;
+
+  // optional horizon
+  up_to_seq?: number;
+
+  // optional snapshot acceleration (same store you already use)
+  snapshotStore?: DecisionSnapshotStore;
+
+  // the edits to apply (same shape as replayCounterfactualWithStore)
+  edits: CounterfactualEdits;
+
+  // optional metadata to stamp on the new branch decision
+  meta?: Record<string, unknown>;
+
+  // optional: reuse your stores/policies in applyEventWithStore
+  snapshotPolicy?: SnapshotPolicy;
+  snapshotRetentionPolicy?: SnapshotRetentionPolicy;
+
+  anchorStore?: DecisionAnchorStore;
+  anchorPolicy?: AnchorPolicy;
+  anchorRetentionPolicy?: { keep_last_n_anchors: number };
+
+  tenant_id?: string | null;
+  ledgerStore?: DecisionLedgerStore;
+  ledgerSigner?: LedgerSigner;
+
+  // If true, bypass enterprise gates (recommended for offline “what-if” materialization)
+  internal_bypass_enterprise_gates?: boolean;
+
+  // If true, enforce trust boundary checks. Default: false (do NOT enforce)
+  enforce_trust_boundary?: boolean;
+};
+
+export type PersistCounterfactualBranchResult =
+  | {
+      ok: true;
+      source_decision_id: string;
+      branch_decision_id: string;
+      applied_events: number;
+      baseline: { up_to_seq: number; base_seq: number; latest_seq: number; decision: Decision };
+      counterfactual: { up_to_seq: number; decision: Decision };
+      warnings: PolicyViolation[];
+      used: CounterfactualResult["used"];
+    }
+  | {
+      ok: false;
+      source_decision_id: string;
+      branch_decision_id: string;
+      applied_events: number;
+      baseline: { up_to_seq: number; base_seq: number; latest_seq: number; decision: Decision };
+      counterfactual: { up_to_seq: number; decision: Decision };
+      violations: PolicyViolation[];
+      used: CounterfactualResult["used"];
+    };
+
+
+
+
+
+function cloneEventForAppend(ev: DecisionEvent): DecisionEvent {
+  // keep deterministic replay + remove shared refs
+  return JSON.parse(JSON.stringify(ev));
+}
+
+async function buildCounterfactualEventListWithStore(
+  store: DecisionStore,
+  input: {
+    decision_id: string;
+    up_to_seq?: number;
+    snapshotStore?: DecisionSnapshotStore;
+    edits: CounterfactualEdits;
+  },
+  opts: DecisionEngineOptions = {}
+): Promise<{
+  baseDecision: Decision;
+  baseSeq: number;
+  latestSeq: number;
+  upto: number;
+  baselineEvents: DecisionEvent[];
+  counterfactualEvents: DecisionEvent[];
+  used: CounterfactualResult["used"];
+}> {
+  const decision_id = input.decision_id;
+
+  const rootMaybe = await store.getRootDecision(decision_id);
+  if (!rootMaybe) {
+    throw new Error("DECISION_NOT_FOUND");
+  }
+
+  const snapshot = input.snapshotStore
+    ? await input.snapshotStore.getLatestSnapshot(decision_id)
+    : null;
+
+  const baseDecision = snapshot
+    ? ((snapshot as any).decision as Decision)
+    : canonicalDraftRootFromStored(rootMaybe);
+
+  const baseSeq = snapshot ? Number((snapshot as any).up_to_seq ?? 0) : 0;
+
+  const tailAll = await loadDeltaEvents(store, decision_id, baseSeq);
+  const latestSeq = tailAll.length ? Number(tailAll[tailAll.length - 1]!.seq) : baseSeq;
+
+  const requestedUpto =
+    typeof input.up_to_seq === "number" ? Math.floor(input.up_to_seq) : latestSeq;
+
+  const upto = Math.max(baseSeq, Math.min(requestedUpto, latestSeq));
+
+  const baselineEvents = tailAll
+    .filter((r) => r.seq <= upto)
+    .map((r) => r.event);
+
+  // replace map
+  const replaceMap = new Map<number, { event: DecisionEvent; keep_original_at: boolean }>();
+  for (const r of input.edits.replace ?? []) {
+    if (!Number.isFinite(r.seq) || r.seq <= 0) continue;
+    replaceMap.set(Math.floor(r.seq), {
+      event: r.event,
+      keep_original_at: r.keep_original_at !== false,
+    });
+  }
+
+  const truncAfter =
+    typeof input.edits.truncate_after_seq === "number"
+      ? Math.floor(input.edits.truncate_after_seq)
+      : null;
+
+  const cfEvents: DecisionEvent[] = [];
+  for (const rec of tailAll) {
+    if (rec.seq > upto) break;
+    if (truncAfter != null && rec.seq > truncAfter) break;
+
+    const rep = replaceMap.get(rec.seq);
+    if (!rep) {
+      cfEvents.push(rec.event);
+      continue;
+    }
+
+    const originalAt = (rec.event as any)?.at;
+    const patched = rep.keep_original_at && originalAt
+      ? ({ ...(rep.event as any), at: originalAt } as any)
+      : (rep.event as any);
+
+    cfEvents.push(patched as any);
+  }
+
+  // append extra events (stamp at deterministically if missing)
+  const append = Array.isArray(input.edits.append) ? input.edits.append : [];
+  const appendStamped = append.map((ev) => {
+    const hasAt = typeof (ev as any)?.at === "string" && (ev as any).at.length > 0;
+    return hasAt ? ev : ({ ...(ev as any), at: nowIso(opts) } as any);
+  });
+
+  cfEvents.push(...appendStamped);
+
+  const used = {
+    base_seq: baseSeq,
+    latest_seq: latestSeq,
+    replaced_seqs: Array.from(replaceMap.keys()).sort((a, b) => a - b),
+    truncated_after_seq: truncAfter,
+    appended_count: appendStamped.length,
+  };
+
+  return {
+    baseDecision,
+    baseSeq,
+    latestSeq,
+    upto,
+    baselineEvents,
+    counterfactualEvents: cfEvents,
+    used,
+  };
+}
+
+export async function persistCounterfactualBranchWithStore(
+  store: DecisionStore,
+  input: PersistCounterfactualBranchInput,
+  opts: DecisionEngineOptions = {}
+): Promise<PersistCounterfactualBranchResult> {
+  const sourceId = input.decision_id;
+  const branchId = input.new_decision_id;
+
+  // 1) compute baseline + counterfactual decisions (pure, no writes)
+  let plan: Awaited<ReturnType<typeof buildCounterfactualEventListWithStore>>;
+  try {
+    plan = await buildCounterfactualEventListWithStore(
+      store,
+      {
+        decision_id: sourceId,
+        up_to_seq: input.up_to_seq,
+        snapshotStore: input.snapshotStore,
+        edits: input.edits,
+      },
+      opts
+    );
+  } catch (e) {
+    const d = createDecisionV2(
+      { decision_id: sourceId, meta: {}, artifacts: {}, version: 1 } as any,
+      () => nowIso(opts)
+    ) as any;
+
+    return {
+      ok: false,
+      source_decision_id: sourceId,
+      branch_decision_id: branchId,
+      applied_events: 0,
+      baseline: { up_to_seq: 0, base_seq: 0, latest_seq: 0, decision: d as any },
+      counterfactual: { up_to_seq: 0, decision: d as any },
+      violations: [
+        { code: "DECISION_NOT_FOUND", severity: "BLOCK", message: "Source decision does not exist." },
+      ],
+      used: {
+        base_seq: 0,
+        latest_seq: 0,
+        replaced_seqs: [],
+        truncated_after_seq: null,
+        appended_count: 0,
+      },
+    };
+  }
+
+  // --- normalize events for replay (some callers use { type } instead of { event_type }) ---
+  const normalizeForReplay = (ev: any) => {
+    if (ev == null) return ev;
+
+    const hasEventType = typeof ev.event_type === "string" && ev.event_type.length > 0;
+    const hasType = typeof ev.type === "string" && ev.type.length > 0;
+
+    // Make replay robust: satisfy either engine convention by ensuring both fields exist.
+    if (hasEventType && !hasType) return { ...ev, type: ev.event_type };
+    if (hasType && !hasEventType) return { ...ev, event_type: ev.type };
+
+    return ev;
+  };
+  const baselineEventsForReplay = plan.baselineEvents.map(normalizeForReplay);
+  const cfEventsForReplay = plan.counterfactualEvents.map(normalizeForReplay);
+
+  const rrBaseline = replayDecision(
+    plan.baseDecision,
+    baselineEventsForReplay,
+    { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+  );
+
+  const rrCF = replayDecision(
+    plan.baseDecision,
+    cfEventsForReplay,
+    { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+  );
+
+  const baselineDecision = rrBaseline.decision;
+  const cfDecision = rrCF.decision;
+
+  // 2) create branch root
+  const existingBranch = await store.getRootDecision(branchId);
+  if (existingBranch) {
+    return {
+      ok: false,
+      source_decision_id: sourceId,
+      branch_decision_id: branchId,
+      applied_events: 0,
+      baseline: { up_to_seq: plan.upto, base_seq: plan.baseSeq, latest_seq: plan.latestSeq, decision: baselineDecision },
+      counterfactual: { up_to_seq: plan.upto, decision: cfDecision },
+      violations: [
+        {
+          code: "BRANCH_ALREADY_EXISTS",
+          severity: "BLOCK",
+          message: `Branch decision_id already exists: ${branchId}`,
+        },
+      ],
+      used: plan.used,
+    };
+  }
+
+  const sourceRoot = await store.getRootDecision(sourceId);
+  const createdAt = nowIso(opts);
+
+  const branchRoot = createDecisionV2(
+    {
+      decision_id: branchId,
+      parent_decision_id: sourceId,
+      meta: {
+        ...(sourceRoot?.meta ?? {}),
+        ...(input.meta ?? {}),
+        counterfactual_of: sourceId,
+        counterfactual_created_at: createdAt,
+        counterfactual_upto_seq: plan.upto,
+        counterfactual_base_seq: plan.baseSeq,
+      },
+      artifacts: {}, // keep genesis clean
+      version: 1,
+    } as any,
+    () => createdAt
+  ) as any;
+
+  await store.createDecision(branchRoot as any);
+  await store.putDecision(branchRoot as any);
+
+  // 3) materialize by applying planned counterfactual event list onto the new branch decision
+  let applied = 0;
+  let warnings: PolicyViolation[] = [];
+  for (const ev of plan.counterfactualEvents) {
+    const r = await applyEventWithStore(
+      store,
+      {
+        decision_id: branchId,
+        event: cloneEventForAppend(ev),
+
+        // reuse infra if provided
+        snapshotStore: input.snapshotStore,
+        snapshotPolicy: input.snapshotPolicy,
+        snapshotRetentionPolicy: input.snapshotRetentionPolicy,
+        anchorStore: input.anchorStore,
+        anchorPolicy: input.anchorPolicy,
+        anchorRetentionPolicy: input.anchorRetentionPolicy,
+
+        tenant_id: input.tenant_id ?? null,
+        ledgerStore: input.ledgerStore,
+        ledgerSigner: input.ledgerSigner,
+
+        // default: bypass enterprise gates for deterministic offline branch creation
+        internal_bypass_enterprise_gates: input.internal_bypass_enterprise_gates !== false,
+
+        // default: do NOT enforce trust boundary on branch materialization
+        enforce_trust_boundary: input.enforce_trust_boundary === true,
+      } as any,
+      opts
+    );
+
+    applied++;
+
+    if (!r.ok) {
+      const finalBranch = (await store.getDecision(branchId)) ?? branchRoot;
+      return {
+        ok: false,
+        source_decision_id: sourceId,
+        branch_decision_id: branchId,
+        applied_events: applied,
+        baseline: { up_to_seq: plan.upto, base_seq: plan.baseSeq, latest_seq: plan.latestSeq, decision: baselineDecision },
+        counterfactual: { up_to_seq: plan.upto, decision: finalBranch },
+        violations: r.violations,
+        used: plan.used,
+      };
+    }
+
+    warnings = [...warnings, ...(r.warnings ?? [])];
+  }
+
+  const finalBranch = (await store.getDecision(branchId)) ?? branchRoot;
+
+  // 4) build an in-memory "materialized" view by replaying branch events
+  // (some stores return the genesis snapshot from getDecision; replay guarantees latest state)
+  const branchEventRecs = await store.listEvents(branchId);
+
+  const branchEventsForReplay = branchEventRecs
+    .map((r: any) => r?.event ?? r) // supports stores that return {event, seq, hash,...} OR raw events
+    .map(normalizeForReplay);
+
+  const rrBranch = replayDecision(
+    branchRoot as any,
+    branchEventsForReplay as any,
+    { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+  );
+
+  const materializedBranch = rrBranch.decision as any;
+
+  return {
+    ok: rrCF.ok !== false && rrBaseline.ok !== false,
+    source_decision_id: sourceId,
+    branch_decision_id: branchId,
+    applied_events: applied,
+    baseline: { up_to_seq: plan.upto, base_seq: plan.baseSeq, latest_seq: plan.latestSeq, decision: baselineDecision },
+    counterfactual: { up_to_seq: plan.upto, decision: materializedBranch },
+    warnings: [...(rrBaseline.ok ? (rrBaseline.warnings ?? []) : []), ...(rrCF.ok ? (rrCF.warnings ?? []) : []), ...warnings],
+    used: plan.used,
+  } as any;
+}
+
+
+
+
+
+
+
 // -----------------------------
 // result
 // -----------------------------
@@ -952,6 +1351,9 @@ export async function applyEventWithStore(
     };
 
     enforce_trust_boundary?: boolean;
+
+    // ✅ Feature 19: signer binding directory (public keys)
+    signerDirectory?: SignerDirectory;
 
     // ✅ Internal: allow system / migrations / commitCounterfactual to bypass enterprise gates
     internal_bypass_enterprise_gates?: boolean;
@@ -1346,11 +1748,16 @@ export async function applyEventWithStore(
       if (FINALIZE_TYPES.has(t as any)) {
         let roles: string[] = [];
         try {
-          if (db) {
-            const rows = db
-              .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
-              .all(input.decision_id, (input.event as any)?.actor_id);
-            roles = rows.map((r: any) => String(r.role));
+          const actorId = String((input.event as any)?.actor_id ?? "");
+          if (actorId) {
+            if (typeof store.listRoles === "function") {
+              roles = (await store.listRoles(input.decision_id, actorId)) ?? [];
+            } else if (db) {
+              const rows = db
+                .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
+                .all(input.decision_id, actorId);
+              roles = rows.map((r: any) => String(r.role));
+            }
           }
         } catch (e) {}
 
@@ -1440,6 +1847,9 @@ export async function applyEventWithStore(
 
     // ✅ Feature 8: enrich ATTEST_EXTERNAL event with payload+receipt
     let eventToAppend: DecisionEvent = input.event;
+    // ✅ Canonical event time (deterministic replay)
+    // IMPORTANT: compute ONCE and reuse, otherwise opts.now() may change between calls.
+    const eventAt = nowIso(opts);
 
     if (input.attestor && input.event.type === "ATTEST_EXTERNAL") {
       const state_hash = computeDecisionStateHash(headDecision);
@@ -1462,12 +1872,11 @@ export async function applyEventWithStore(
       const payload = buildDecisionAttestationPayload({
         decision: headDecision,
         state_hash,
-        attested_at: nowIso(opts),
+        attested_at: eventAt,
         target,
         snapshot_up_to_seq,
         tags,
       });
-
       const receipt = await input.attestor.attest(payload);
 
       const expected_payload_hash = computePayloadHash(payload);
@@ -1501,20 +1910,28 @@ export async function applyEventWithStore(
     }
  
         // ✅ Feature 17: Trust boundary enforcement (foundation)
-        if (input.enforce_trust_boundary !== false) {
+       if (input.enforce_trust_boundary === true) {
           // If caller provided trustContext, optionally attach a trust envelope (origin tagging)
-          if (input.trustContext?.origin_zone && !(eventToAppend as any).trust) {
+          const hasTrustContext =
+            !!(input.trustContext?.origin_zone ||
+              input.trustContext?.origin_system ||
+              input.trustContext?.channel ||
+              input.trustContext?.tenant_id);
+
+          const tc = input.trustContext;
+
+          if (hasTrustContext && !(eventToAppend as any).trust) {
             (eventToAppend as any) = {
               ...(eventToAppend as any),
               trust: {
                 origin: {
-                  zone: input.trustContext.origin_zone,
-                  system: input.trustContext.origin_system ?? undefined,
-                  channel: input.trustContext.channel ?? undefined,
-                  tenant_id: input.trustContext.tenant_id ?? undefined,
+                  zone: tc?.origin_zone ?? undefined,
+                  system: tc?.origin_system ?? undefined,
+                  channel: tc?.channel ?? undefined,
+                  tenant_id: tc?.tenant_id ?? undefined,
                 },
                 claimed_by: "store-engine",
-                asserted_at: nowIso(opts),
+                asserted_at: eventAt,
               },
             };
           }
@@ -1522,13 +1939,34 @@ export async function applyEventWithStore(
           const tv = enforceTrustBoundaryV2({
             decision: headDecision,
             event: eventToAppend,
-            trustContext: input.trustContext,
+            trustContext: tc,
           } as any);
 
           if (tv.length) {
             return { ok: false, decision: headDecision, violations: tv, consequence_preview };
           }
         } // ✅ IMPORTANT: this brace must exist
+
+      
+
+      // ✅ Feature 19: Cryptographic signer binding (finalize events)
+      if (input.require_signer_identity_binding === true) {
+        const sb = await verifySignerBindingAsync({
+          decision_id: input.decision_id,
+          decision_before: headDecision, // before finalize
+          event: eventToAppend,
+          eventAt,
+          signerDirectory: input.signerDirectory as any,
+        });
+
+        if (sb.length) {
+          return { ok: false, decision: headDecision, violations: sb, consequence_preview };
+        }
+      } 
+
+
+
+
 
       // ✅ Enterprise Workflow Gate
       if (!input.internal_bypass_enterprise_gates) {
@@ -1561,9 +1999,7 @@ export async function applyEventWithStore(
         }
       }
 
-      // ✅ Canonical event time (deterministic replay)
-      const eventAt = nowIso(opts);
-
+      
       // ✅ Stamp into event so replay uses the same time later
       eventToAppend = {
         ...(eventToAppend as any),
@@ -1691,13 +2127,9 @@ export async function applyEventWithStore(
           } as any)
         : (withProv as any);
 
-      await store.putDecision(withPLS);
-
-
-    
-
-    
       const toPersist = bindDecisionId(withPLS, input.decision_id);
+      // ✅ persist once (canonical head for everything downstream)
+      await store.putDecision(toPersist);
 
 
     // ✅ Feature 15 (Option B): persist PLS shield row (auditable)
@@ -1797,7 +2229,6 @@ export async function applyEventWithStore(
         // -----------------------------
         // 1) Tamper hashes (store integrity)
         // -----------------------------
-        const beforeDecision = headDecision; // <-- replace headDecision with YOUR actual "before" variable
         const beforeHash = computeTamperStateHash(stripNonStateFieldsForHash(headDecision));
         const afterHash  = computeTamperStateHash(stripNonStateFieldsForHash(toPersist));
 
@@ -1807,7 +2238,7 @@ export async function applyEventWithStore(
         // -----------------------------
         // 2) Public hashes (portable, canonical identity)
         const publicBeforeHash = computePublicStateHash(stripNonStateFieldsForHash(headDecision));
-        const publicAfterHash  = computePublicStateHash(stripNonStateFieldsForHash(withProv)); // ✅ canonical replay head
+        const publicAfterHash = computePublicStateHash(stripNonStateFieldsForHash(toPersist));
 
         const execution =
           (toPersist as any)?.artifacts?.execution ?? null;
@@ -2319,8 +2750,325 @@ export async function applyEventWithStore(
 
         return { ok: true, decision: toPersist, warnings: rrPreview.warnings, consequence_preview };
   });
+}
+
+// =====================================
+// ✅ Feature 16: Deterministic Rollback & Counterfactual Replay
+// =====================================
+
+export type CounterfactualEdits = {
+    /**
+     * Replace one or more historical events by seq.
+     * - Keep `at` stable if you want strict determinism (recommended).
+     */
+    replace?: Array<{
+      seq: number;
+      event: DecisionEvent;
+      keep_original_at?: boolean; // default true
+    }>;
+
+    /**
+     * Drop all events AFTER this seq (history truncation).
+     * If set, the counterfactual branch ends here unless you also `append`.
+     */
+    truncate_after_seq?: number;
+
+    /**
+     * Append extra events AFTER the (possibly truncated) history.
+     * We will stamp `at` deterministically using opts.now if not provided.
+     */
+    append?: DecisionEvent[];
+  };
+
+export type RewindResult =
+    | { ok: true; decision: Decision; up_to_seq: number; base_seq: number; warnings: PolicyViolation[] }
+    | { ok: false; decision: Decision; up_to_seq: number; base_seq: number; violations: PolicyViolation[] };
+
+export type CounterfactualResult =
+    | {
+        ok: true;
+        decision_id: string;
+        baseline: { decision: Decision; up_to_seq: number };
+        counterfactual: { decision: Decision; up_to_seq: number };
+        warnings: PolicyViolation[];
+        used: {
+          base_seq: number;
+          latest_seq: number;
+          replaced_seqs: number[];
+          truncated_after_seq: number | null;
+          appended_count: number;
+        };
+      }
+    | {
+        ok: false;
+        decision_id: string;
+        baseline: { decision: Decision; up_to_seq: number };
+        counterfactual: { decision: Decision; up_to_seq: number };
+        violations: PolicyViolation[];
+        used: {
+          base_seq: number;
+          latest_seq: number;
+          replaced_seqs: number[];
+          truncated_after_seq: number | null;
+          appended_count: number;
+        };
+      };
+
+  // Helper: load events after base_seq, but only up to some seq (inclusive)
+  async function loadEventsRange(
+    store: DecisionStore,
+    decision_id: string,
+    after_seq: number,
+    up_to_seq: number
+  ): Promise<DecisionEventRecord[]> {
+    const all = await loadDeltaEvents(store, decision_id, after_seq);
+    return all.filter((r) => r.seq <= up_to_seq);
+  }
+
+  // Helper: load events after base_seq (full tail)
+  async function loadEventsTailAll(
+    store: DecisionStore,
+    decision_id: string,
+    after_seq: number
+  ): Promise<DecisionEventRecord[]> {
+    return loadDeltaEvents(store, decision_id, after_seq);
+  }
+
+// ✅ Feature 16-A: rewind to an arbitrary seq (deterministic)
+export async function rewindDecisionWithStore(
+    store: DecisionStore,
+    input: {
+      decision_id: string;
+      up_to_seq: number; // target seq
+      snapshotStore?: DecisionSnapshotStore;
+    },
+    opts: DecisionEngineOptions = {}
+  ): Promise<RewindResult> {
+    const decision_id = input.decision_id;
+    const targetSeq = Math.max(0, Math.floor(input.up_to_seq ?? 0));
+
+    // load root
+    const rootMaybe = await store.getRootDecision(decision_id);
+    if (!rootMaybe) {
+      // no decision => rewind is just a clean genesis draft
+      const d = createDecisionV2(
+        { decision_id, meta: {}, artifacts: {}, version: 1 } as any,
+        () => nowIso(opts)
+      ) as any;
+      return { ok: true, decision: d as any, up_to_seq: 0, base_seq: 0, warnings: [] };
+    }
+
+    // snapshot best-effort: only use it if it is <= target
+    const snapshot = input.snapshotStore
+      ? await input.snapshotStore.getLatestSnapshot(decision_id)
+      : null;
+
+    const canUseSnap = snapshot && Number((snapshot as any).up_to_seq ?? 0) <= targetSeq;
+
+    const baseDecision = canUseSnap
+      ? ((snapshot as any).decision as Decision)
+      : canonicalDraftRootFromStored(rootMaybe);
+
+    const baseSeq = canUseSnap ? Number((snapshot as any).up_to_seq ?? 0) : 0;
+
+    const delta = await loadEventsRange(store, decision_id, baseSeq, targetSeq);
+
+    const rr = replayDecision(
+      baseDecision,
+      delta.map((r) => r.event),
+      { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+    );
+
+    if (rr.ok === false) {
+      return {
+        ok: false,
+        decision: rr.decision,
+        up_to_seq: targetSeq,
+        base_seq: baseSeq,
+        violations: rr.violations,
+      };
+    }
+
+    return {
+      ok: true,
+      decision: rr.decision,
+      up_to_seq: targetSeq,
+      base_seq: baseSeq,
+      warnings: rr.warnings ?? [],
+    };
+  }
+
+// ✅ Feature 16-B: counterfactual replay (replace / truncate / append) without persisting
+export async function replayCounterfactualWithStore(
+    store: DecisionStore,
+    input: {
+      decision_id: string;
+
+      /**
+       * What horizon to replay to.
+       * - default: replay to latest (all events)
+       */
+      up_to_seq?: number;
+
+      snapshotStore?: DecisionSnapshotStore;
+
+      edits: CounterfactualEdits;
+    },
+    opts: DecisionEngineOptions = {}
+  ): Promise<CounterfactualResult> {
+    const decision_id = input.decision_id;
+
+    // load root (required)
+    const rootMaybe = await store.getRootDecision(decision_id);
+    if (!rootMaybe) {
+      const d = createDecisionV2(
+        { decision_id, meta: {}, artifacts: {}, version: 1 } as any,
+        () => nowIso(opts)
+      ) as any;
+
+      return {
+        ok: false,
+        decision_id,
+        baseline: { decision: d as any, up_to_seq: 0 },
+        counterfactual: { decision: d as any, up_to_seq: 0 },
+        violations: [
+          { code: "DECISION_NOT_FOUND", severity: "BLOCK", message: "Decision does not exist." },
+        ],
+        used: {
+          base_seq: 0,
+          latest_seq: 0,
+          replaced_seqs: [],
+          truncated_after_seq: null,
+          appended_count: 0,
+        },
+      };
+    }
+
+    // choose base (snapshot best-effort)
+    const snapshot = input.snapshotStore
+      ? await input.snapshotStore.getLatestSnapshot(decision_id)
+      : null;
+
+    const baseDecision = snapshot
+      ? ((snapshot as any).decision as Decision)
+      : canonicalDraftRootFromStored(rootMaybe);
+
+    const baseSeq = snapshot ? Number((snapshot as any).up_to_seq ?? 0) : 0;
+
+    // load full tail and find latest seq
+    const tailAll = await loadEventsTailAll(store, decision_id, baseSeq);
+    const latestSeq = tailAll.length ? Number(tailAll[tailAll.length - 1]!.seq) : baseSeq;
+
+    const requestedUpto =
+      typeof input.up_to_seq === "number" ? Math.floor(input.up_to_seq) : latestSeq;
+
+    const upto = Math.max(baseSeq, Math.min(requestedUpto, latestSeq));
+
+    // baseline: replay original events up to `upto`
+    const baselineEvents = tailAll.filter((r) => r.seq <= upto).map((r) => r.event);
+
+    const rrBaseline = replayDecision(
+      baseDecision,
+      baselineEvents,
+      { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+    );
+
+    const baselineDecision = rrBaseline.ok ? rrBaseline.decision : rrBaseline.decision;
+
+    // Build edited event list
+    const replaceMap = new Map<number, { event: DecisionEvent; keep_original_at: boolean }>();
+    for (const r of input.edits.replace ?? []) {
+      if (!Number.isFinite(r.seq) || r.seq <= 0) continue;
+      replaceMap.set(Math.floor(r.seq), {
+        event: r.event,
+        keep_original_at: r.keep_original_at !== false,
+      });
+    }
+
+    const truncAfter =
+      typeof input.edits.truncate_after_seq === "number"
+        ? Math.floor(input.edits.truncate_after_seq)
+        : null;
+
+    const cfEvents: DecisionEvent[] = [];
+    for (const rec of tailAll) {
+      if (rec.seq > upto) break;
+
+      if (truncAfter != null && rec.seq > truncAfter) break;
+
+      const rep = replaceMap.get(rec.seq);
+      if (!rep) {
+        cfEvents.push(rec.event);
+        continue;
+      }
+
+      // preserve original at unless caller explicitly disables
+      const originalAt = (rec.event as any)?.at;
+      const patched = rep.keep_original_at && originalAt
+        ? ({ ...(rep.event as any), at: originalAt } as any)
+        : (rep.event as any);
+
+      cfEvents.push(patched as any);
+    }
+
+    // append extra events (stamp at deterministically if missing)
+    const append = Array.isArray(input.edits.append) ? input.edits.append : [];
+    const appendStamped = append.map((ev) => {
+      const hasAt = typeof (ev as any)?.at === "string" && (ev as any).at.length > 0;
+      return hasAt ? ev : ({ ...(ev as any), at: nowIso(opts) } as any);
+    });
+
+    cfEvents.push(...appendStamped);
+
+    const rrCF = replayDecision(
+      baseDecision,
+      cfEvents,
+      { ...opts, allow_locked_event_types: lockedAllowlistFromInput({}) }
+    );
+
+    const used = {
+      base_seq: baseSeq,
+      latest_seq: latestSeq,
+      replaced_seqs: Array.from(replaceMap.keys()).sort((a, b) => a - b),
+      truncated_after_seq: truncAfter,
+      appended_count: appendStamped.length,
+    };
+
+    // If baseline replay failed, we still return something useful
+    if (rrBaseline.ok === false) {
+      return {
+        ok: false,
+        decision_id,
+        baseline: { decision: rrBaseline.decision, up_to_seq: upto },
+        counterfactual: { decision: rrBaseline.decision, up_to_seq: upto },
+        violations: rrBaseline.violations,
+        used,
+      };
+    }
+
+    if (rrCF.ok === false) {
+      return {
+        ok: false,
+        decision_id,
+        baseline: { decision: rrBaseline.decision, up_to_seq: upto },
+        counterfactual: { decision: rrCF.decision, up_to_seq: upto },
+        violations: rrCF.violations,
+        used,
+      };
+    }
+
+    return {
+      ok: true,
+      decision_id,
+      baseline: { decision: rrBaseline.decision, up_to_seq: upto },
+      counterfactual: { decision: rrCF.decision, up_to_seq: upto },
+      warnings: [...(rrBaseline.warnings ?? []), ...(rrCF.warnings ?? [])],
+      used,
+    };
+  }
+
 
   
 
-}
+
 

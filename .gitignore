@@ -24,3 +24,11 @@ proof-pack/
 
 # local scripts / scratch
 hash-sweep.ts
+
+.DS_Store
+node_modules/
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+/tmp-*.ts
+/test-liability.db

@@ -35,7 +35,10 @@ function toNode(d: Decision): ForkGraphNode {
     title: meta.title,
     owner_id: meta.owner_id,
     source: meta.source,
-    parent_decision_id: meta.parent_decision_id,
+    parent_decision_id:
+      (d as any).parent_decision_id ??
+      (meta as any)?.parent_decision_id ??
+      null,
     fork_from_seq: typeof meta.fork_from_seq === "number" ? meta.fork_from_seq : undefined,
   };
 }
@@ -43,7 +46,9 @@ function toNode(d: Decision): ForkGraphNode {
 /**
  * V7 fork graph builder.
  * You pass candidate_decision_ids (same pattern as lineage).
- * We read each decision's ROOT meta: parent_decision_id + fork_from_seq.
+  * We read each decision's ROOT decision fields (canonical-first):
+ * - parent_decision_id (top-level), with meta.parent_decision_id as legacy fallback
+ * - fork_from_seq (currently stored in meta)
  */
 export async function buildForkGraph(
   store: DecisionStore,

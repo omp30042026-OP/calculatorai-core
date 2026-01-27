@@ -564,31 +564,15 @@ export class SqliteDecisionStore
       .run(String(decision_id), String(actor_id), String(role));
   }
 
-  async listRoles(decision_id: string, actor_id?: string): Promise<DecisionRoleRecord[]> {
-    const rows = actor_id
-      ? (this.db
-          .prepare(
-            `SELECT decision_id, actor_id, role, created_at
-             FROM decision_roles
-             WHERE decision_id=? AND actor_id=?
-             ORDER BY created_at ASC;`
-          )
-          .all(String(decision_id), String(actor_id)) as any[])
-      : (this.db
-          .prepare(
-            `SELECT decision_id, actor_id, role, created_at
-             FROM decision_roles
-             WHERE decision_id=?
-             ORDER BY actor_id ASC, role ASC;`
-          )
-          .all(String(decision_id)) as any[]);
+  async listRoles(decision_id: string, actor_id: string): Promise<string[]> {
+    const db: any = (this as any).db;
+    if (!db) return [];
 
-    return rows.map((r) => ({
-      decision_id: String(r.decision_id),
-      actor_id: String(r.actor_id),
-      role: String(r.role),
-      created_at: String(r.created_at),
-    }));
+    const rows = db
+      .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
+      .all(decision_id, actor_id);
+
+    return rows.map((r: any) => String(r.role));
   }
 
   async hasAnyRole(decision_id: string, actor_id: string, roles: string[]): Promise<boolean> {
@@ -782,7 +766,7 @@ export class SqliteDecisionStore
       ? String((decision as any).parent_decision_id)
       : null;
 
-  const root_id = parent_id ?? decision_id;
+  const root_id = decision_id;
 
   this.db
     .prepare(
@@ -809,7 +793,7 @@ export class SqliteDecisionStore
       ? String((decision as any).parent_decision_id)
       : null;
 
-  const root_id = parent_id ?? decision_id;
+  const root_id = decision_id;
 
   this.db
     .prepare(

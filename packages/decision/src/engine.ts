@@ -748,6 +748,11 @@ export function applyDecisionEvent(
     "AGENT_PROPOSE",
     "AGENT_TRIGGER_OBLIGATION",
 
+    // ✅ Diagnostics / replay-only: do NOT change decision.state
+    "VALIDATE",
+    "SIMULATE",
+    "EXPLAIN",
+
 
   ];
 
