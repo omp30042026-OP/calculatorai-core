@@ -12,10 +12,25 @@ import type {
   SnapshotPolicy,
 } from "../packages/decision/src/snapshots.js";
 
-// ---- tiny assert helper ----
+// ---- assert helper that prints violations ----
+function assertOk(r: any, label: string) {
+  if (!r || typeof r !== "object") {
+    throw new Error(`${label} failed: no result object`);
+  }
+  if (r.ok === false) {
+    throw new Error(
+      `${label} failed: ` + JSON.stringify(r.violations ?? [], null, 2)
+    );
+  }
+  if (r.ok !== true) {
+    throw new Error(`${label} failed: unexpected result.ok = ${String(r.ok)}`);
+  }
+}
+
 function assert(cond: unknown, msg: string): asserts cond {
   if (!cond) throw new Error(msg);
 }
+
 
 // ---- deterministic now() for replay ----
 function makeDeterministicNow(startIso = "2025-01-01T00:00:00.000Z") {
@@ -189,17 +204,23 @@ class InMemorySnapshotStore implements DecisionSnapshotStore {
 
   async getLatestSnapshot(decision_id: string): Promise<DecisionSnapshot | null> {
     const arr = this.snaps.get(decision_id) ?? [];
-    return arr.length ? arr[arr.length - 1]! : null;
+    if (!arr.length) return null;
+
+    // IMPORTANT: return a deep clone so replay can't mutate stored snapshot
+    return JSON.parse(JSON.stringify(arr[arr.length - 1]!)) as DecisionSnapshot;
   }
 
   async putSnapshot(snapshot: DecisionSnapshot): Promise<void> {
-    const arr = this.snaps.get(snapshot.decision_id) ?? [];
-    const idx = arr.findIndex((s) => s.up_to_seq === snapshot.up_to_seq);
-    if (idx >= 0) arr[idx] = snapshot;
-    else arr.push(snapshot);
+    // IMPORTANT: store a deep clone so later code can't mutate it
+    const snapCopy = JSON.parse(JSON.stringify(snapshot)) as DecisionSnapshot;
+
+    const arr = this.snaps.get(snapCopy.decision_id) ?? [];
+    const idx = arr.findIndex((s) => s.up_to_seq === snapCopy.up_to_seq);
+    if (idx >= 0) arr[idx] = snapCopy;
+    else arr.push(snapCopy);
 
     arr.sort((a, b) => a.up_to_seq - b.up_to_seq);
-    this.snaps.set(snapshot.decision_id, arr);
+    this.snaps.set(snapCopy.decision_id, arr);
   }
 
   async pruneSnapshots(decision_id: string, keep_last_n: number): Promise<{ deleted: number }> {
@@ -256,7 +277,7 @@ async function main() {
     },
     opts
   );
-  assert(r1.ok, "validate failed");
+  assertOk(r1, "validate");
 
   const r2 = await applyEventWithStore(
     store,
@@ -269,7 +290,7 @@ async function main() {
     },
     opts
   );
-  assert(r2.ok, "simulate failed");
+  assertOk(r2, "simulate");
 
   // add some events so we create multiple snapshots + trigger retention
   for (let i = 0; i < 8; i++) {
@@ -288,11 +309,11 @@ async function main() {
       },
       opts
     );
-    assert(r.ok, `tick ${i} failed`);
+    assertOk(r, `tick ${i}`);
   }
 
   const current = await store.getDecision(decision_id);
-  assert(current, "missing current decision");
+  assert(current, "missing current decision"); // narrows to non-null
 
   const snap = await snapshotStore.getLatestSnapshot(decision_id);
 
@@ -303,7 +324,7 @@ async function main() {
         state: current.state,
         history_len: current.history?.length ?? 0,
         snapshot_up_to_seq: snap?.up_to_seq ?? null,
-        snapshots_kept_in_memory: snapshotStore.count(decision_id), // should be <= 2
+        snapshots_kept_in_memory: snapshotStore.count(decision_id),
       },
       null,
       2

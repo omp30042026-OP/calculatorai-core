@@ -49,6 +49,48 @@ export type MerkleProof = {
   siblings: MerkleProofStep[];
 };
 
+// Add near other store types/exports
+export type DecisionEdgeDirection = "UPSTREAM" | "DOWNSTREAM";
+
+export type DecisionEdgeRecord = {
+  from_decision_id: string;
+  to_decision_id: string;
+  relation: string;
+  via_event_seq: number;
+  edge_hash: string;
+  meta_json: string | null;
+  created_at: string;
+};
+
+
+// ✅ Feature 15: PLS record (auditable)
+export type PlsShieldRecord = {
+  decision_id: string;
+  event_seq: number;
+  event_type: string;
+
+  owner_id: string;
+  approver_id: string;
+
+  signer_state_hash: string;
+
+  payload_json: string | null;
+  shield_hash: string;
+
+  created_at: string;
+};
+
+
+export type DecisionRoleRecord = {
+  decision_id: string;
+  actor_id: string;
+  role: string;
+  created_at: string;
+};
+
+
+
+
 export type DecisionStore = {
   // decisions
   createDecision(decision: Decision): Promise<void>;
@@ -100,6 +142,59 @@ export type DecisionStore = {
     decision_id: string,
     idempotency_key: string
   ): Promise<DecisionEventRecord | null>;
+
+  // ✅ Feature 14: Decision DAG edges (optional but supported by SqliteDecisionStore)
+  listDecisionEdges?: (
+    decision_id: string,
+    direction: DecisionEdgeDirection
+  ) => Promise<DecisionEdgeRecord[]>;
+
+
+
+  /**
+   * ✅ Feature 17: verify hash-chain integrity for all events of a decision.
+   * Returns detailed error list if tampering / corruption is detected.
+   */
+  verifyHashChain?(decision_id: string): Promise<{
+    verified: boolean;
+    errors: Array<{
+      seq: number;
+      code: string;
+      message: string;
+      expected?: string | null;
+      actual?: string | null;
+    }>;
+  }>;
+
+
+    // ✅ Feature 18: RBAC role management (optional but recommended)
+  grantRole?: (
+    decision_id: string,
+    actor_id: string,
+    role: string,
+    created_at?: string
+  ) => Promise<void>;
+
+  revokeRole?: (
+    decision_id: string,
+    actor_id: string,
+    role: string
+  ) => Promise<void>;
+
+  listRoles?: (
+    decision_id: string,
+    actor_id?: string
+  ) => Promise<DecisionRoleRecord[]>;
+
+  hasAnyRole?: (
+    decision_id: string,
+    actor_id: string,
+    roles: string[]
+  ) => Promise<boolean>;
+
+
+
+
 };
 
 

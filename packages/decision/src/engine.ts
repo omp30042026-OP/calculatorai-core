@@ -18,6 +18,9 @@ import {
 import { applyProvenanceTransition, verifyProvenanceChain, migrateProvenanceChain } from "./provenance";
 
 import { setDecisionRisk } from "./risk";
+
+import { enforceTrustBoundary } from "./trust-boundary";
+
 /**
  * IMPORTANT:
  * Your current events.ts does NOT include these legacy event types,
@@ -51,7 +54,7 @@ function getExecBag(decision: Decision): ExecBag {
 
   // Prefer canonical location first: artifacts.execution
   // Fallback to legacy/compat: artifacts.extra.execution
-  return normalizeExecBag(extra.execution ?? a.execution);
+  return normalizeExecBag(a.execution ?? extra.execution);
 }
 
 function cloneExecBag(bag: ExecBag): ExecBag {
@@ -141,6 +144,49 @@ function setPLSBag(decision: Decision, bag: PLSBag): Decision {
   } as any;
 }
 
+// -----------------------------
+// ✅ Feature 18: Agent storage (canonical-first: artifacts.extra.agent)
+// -----------------------------
+type AgentBag = {
+  proposals?: Array<{
+    at: string;
+    actor_id: string | null;
+    proposed_event_type?: string | null;
+    proposal?: any;
+    evidence_refs?: string[] | null;
+  }>;
+};
+
+function normalizeAgentBag(input: any): AgentBag {
+  const bag = input && typeof input === "object" ? input : {};
+  return {
+    proposals: Array.isArray(bag.proposals) ? bag.proposals : [],
+  };
+}
+
+function getAgentBag(decision: Decision): AgentBag {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  return normalizeAgentBag(extra.agent ?? a.agent);
+}
+
+function setAgentBag(decision: Decision, bag: AgentBag): Decision {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  const compat = JSON.parse(JSON.stringify(bag));
+  const canon  = JSON.parse(JSON.stringify(bag));
+  return {
+    ...decision,
+    artifacts: {
+      ...a,
+      agent: compat,                    // compat mirror (optional)
+      extra: { ...extra, agent: canon } // canonical
+    },
+  } as any;
+}
+
+
+
 
 function hasOpenBlockViolation(violations: any[]): boolean {
   return violations.some((v) => v?.severity === "BLOCK" && !v?.resolved_at);
@@ -175,11 +221,56 @@ function isRemediationPayload(eventObj: any): boolean {
   return false;
 }
 
+function maybeApplyCanonicalAmountFromArtifacts(decision: Decision): Decision {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  const amtIn: any = extra.amount ?? null;
+
+  if (!amtIn || typeof amtIn !== "object") return decision;
+  if (typeof amtIn.value !== "number") return decision;
+
+  const currency =
+    typeof amtIn.currency === "string" && amtIn.currency ? String(amtIn.currency) : "USD";
+
+  const amt = { value: Number(amtIn.value), currency };
+
+  return {
+    ...decision,
+    amount: amt as any,
+    fields: { ...(decision as any).fields, amount: amt } as any,
+  } as any;
+}
+
+
+
 
 function isoToSecond(iso: string): string {
   const d = new Date(iso);
   d.setUTCMilliseconds(0);
   return d.toISOString();
+}
+
+// -----------------------------
+// ✅ Feature 17: Trust Boundary hooks (foundation)
+// -----------------------------
+export type TrustZone = "INTERNAL" | "PARTNER" | "VENDOR" | "PUBLIC";
+
+export type TrustBoundary = {
+  zone?: TrustZone;
+  origin?: {
+    system?: string;
+    source?: string;
+    ip?: string;
+    user_agent?: string;
+    request_id?: string;
+  };
+  asserted_by?: string;
+  attested?: boolean; // true if you have an external receipt/attestation
+};
+
+function getEventTrust(e: any): TrustBoundary | null {
+  const t = e?.trust;
+  return t && typeof t === "object" ? (t as TrustBoundary) : null;
 }
 
 
@@ -218,6 +309,15 @@ export type DecisionEngineOptions = {
   policies?: DecisionPolicy[];
   now?: () => string;
   allow_locked_event_types?: Array<DecisionEvent["type"]>;
+
+  // ✅ Feature 17 foundation: enforcement hooks (optional)
+  trustPolicy?: {
+    // for events coming from these zones, restrict which event types can be applied
+    allow_event_types_by_zone?: Partial<Record<TrustZone, AnyEventType[]>>;
+
+    // optionally require attestation (trust.attested=true) for these events when from non-internal zones
+    require_attestation_for_event_types?: AnyEventType[];
+  };
 };
 
 export type ApplyEventResult =
@@ -247,6 +347,9 @@ function getLockedAllowlist(opts: DecisionEngineOptions): Set<AnyEventType> {
     "SET_ROLLBACK_PLAN",
     "ASSIGN_RESPONSIBILITY",
     "ACCEPT_RISK",
+    // ✅ Feature 18
+    "AGENT_PROPOSE",
+    "AGENT_TRIGGER_OBLIGATION",
   ]) as AnyEventType[];
 
   return new Set<AnyEventType>([
@@ -254,6 +357,8 @@ function getLockedAllowlist(opts: DecisionEngineOptions): Set<AnyEventType> {
     "SET_OBLIGATIONS",
     "AUTO_VIOLATION",
     "RESOLVE_VIOLATION",
+    "SET_TRUST_POLICY",
+    "ASSERT_TRUST_ORIGIN",
   ]);
 }
 
@@ -280,7 +385,12 @@ function allowedInDispute(eventType: AnyEventType): boolean {
     eventType === "ADD_IMPACTED_SYSTEM" ||
     eventType === "SET_ROLLBACK_PLAN"||
     eventType === "ASSIGN_RESPONSIBILITY" ||
-    eventType === "ACCEPT_RISK" 
+    eventType === "ACCEPT_RISK"||
+    eventType === "SET_TRUST_POLICY" ||
+    eventType === "ASSERT_TRUST_ORIGIN" ||
+    eventType === "AGENT_PROPOSE"||
+   eventType === "AGENT_TRIGGER_OBLIGATION"
+  
   );
 }
 
@@ -367,14 +477,64 @@ function normalizeEventType(raw: any): AnyEventType {
     .toUpperCase()
     // ✅ remove weird chars
     .replace(/[^A-Z0-9_]/g, "") as AnyEventType;
+  
 }
+
+// -----------------------------
+// ✅ Feature 17: Trust boundary storage (canonical-first: artifacts.extra.trust)
+// -----------------------------
+type TrustBag = {
+  policy?: any | null;
+  last_updated_at?: string | null;
+  last_updated_by?: string | null;
+
+  // optional audit trail of asserted origins (foundation only)
+  asserted_origins?: any[]; // keep light
+};
+
+function getTrustBag(decision: Decision): TrustBag {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  const bag = extra.trust && typeof extra.trust === "object" ? extra.trust : {};
+  return {
+    policy: bag.policy ?? null,
+    last_updated_at: bag.last_updated_at ?? null,
+    last_updated_by: bag.last_updated_by ?? null,
+    asserted_origins: Array.isArray(bag.asserted_origins) ? bag.asserted_origins : [],
+  };
+}
+
+function setTrustBag(decision: Decision, bag: TrustBag): Decision {
+  const a: any = decision.artifacts ?? {};
+  const extra: any = a.extra ?? {};
+  const canon = JSON.parse(JSON.stringify(bag));
+  return {
+    ...decision,
+    artifacts: {
+      ...a,
+      extra: { ...extra, trust: canon },
+    },
+  } as any;
+}
+
 
 export function applyDecisionEvent(
   decision: Decision,
   event: DecisionEvent,
   opts: DecisionEngineOptions = {}
 ): ApplyEventResult {
-  const now = opts.now ?? (() => new Date().toISOString());
+  const nowFn = opts.now ?? (() => new Date().toISOString());
+
+  // ✅ Deterministic time: prefer event.at (stamped by store-engine)
+  const eventAtRaw = (event as any)?.at;
+  const EVENT_AT =
+    (typeof eventAtRaw === "string" && eventAtRaw.length)
+      ? String(eventAtRaw)
+      : nowFn();
+
+  // ✅ Always use these (replay-safe)
+  const now = () => EVENT_AT;
+  const nowSecond = () => isoToSecond(EVENT_AT);
   const policies = opts.policies ?? defaultPolicies();
 
   // Support both shapes:
@@ -410,6 +570,44 @@ export function applyDecisionEvent(
     };
   }
 
+
+  // ✅ Feature 17: enforce STORED trust policy (decision.artifacts.extra.trust.policy)
+  {
+    const tbViolations = enforceTrustBoundary({
+      event: { ...(e0 ?? {}), type: t }, // enforce normalized event type
+      decision,
+      trustContext: {
+        origin_zone: (event as any)?.trust?.origin?.zone ?? null,
+        origin_system: (event as any)?.trust?.origin?.system ?? null,
+        channel: (event as any)?.trust?.origin?.channel ?? null,
+        tenant_id: (event as any)?.trust?.origin?.tenant_id ?? null,
+      },
+    });
+
+    if (tbViolations.length > 0) {
+      return { ok: false, decision, violations: tbViolations };
+    }
+  }
+
+
+
+  // ✅ Feature 18: engine-level safety — agents cannot finalize decisions
+  if ((event as any)?.actor_type === "agent" && (t === "APPROVE" || t === "REJECT")) {
+    return {
+      ok: false,
+      decision,
+      violations: [
+        {
+          code: "AGENT_CANNOT_FINALIZE",
+          severity: "BLOCK",
+          message: `Agent cannot ${t}. Requires human gate.`,
+          details: { event_type: t, actor_id: (event as any)?.actor_id ?? null },
+        },
+      ],
+    };
+  }
+
+
   // dispute mode enforcement
   if (disputeEnabled(decision) && !allowedInDispute(t)) {
     return {
@@ -420,6 +618,52 @@ export function applyDecisionEvent(
           code: "DISPUTE_MODE_BLOCK",
           severity: "BLOCK",
           message: `Decision is in dispute mode; event ${t} is not allowed.`,
+        },
+      ],
+    };
+  }
+
+  // ✅ Feature 17: trust boundary enforcement (foundation)
+  // events.ts shape: trust = { origin: { zone, system, channel, ... }, claimed_by, asserted_at }
+  const trustEnv: any = (event as any)?.trust ?? null;
+  const zone = (trustEnv?.origin?.zone ?? "INTERNAL") as TrustZone;
+
+  const allowByZone = opts.trustPolicy?.allow_event_types_by_zone ?? {};
+  const zoneAllow = allowByZone[zone];
+
+  if (Array.isArray(zoneAllow) && zoneAllow.length > 0) {
+    if (!zoneAllow.includes(t)) {
+      return {
+        ok: false,
+        decision,
+        violations: [
+          {
+            code: "TRUST_ZONE_EVENT_BLOCKED",
+            severity: "BLOCK",
+            message: `Event ${t} is not allowed from trust zone ${zone}.`,
+            details: { zone, event_type: t, origin: trustEnv?.origin ?? null } as any,
+          },
+        ],
+      };
+    }
+  }
+
+  const requireAttFor = new Set<AnyEventType>(
+    opts.trustPolicy?.require_attestation_for_event_types ?? []
+  );
+
+  // NOTE: your event envelope currently doesn't set trust.attested.
+  // This will only matter if you enable require_attestation_for_event_types.
+  if (zone !== "INTERNAL" && requireAttFor.has(t) && trustEnv?.attested !== true) {
+    return {
+      ok: false,
+      decision,
+      violations: [
+        {
+          code: "TRUST_ATTESTATION_REQUIRED",
+          severity: "BLOCK",
+          message: `Event ${t} from zone ${zone} requires attestation.`,
+          details: { zone, event_type: t, origin: trustEnv?.origin ?? null } as any,
         },
       ],
     };
@@ -452,6 +696,8 @@ export function applyDecisionEvent(
       "SET_OBLIGATIONS",
       "AUTO_VIOLATION",
       "RESOLVE_VIOLATION",
+      "AGENT_PROPOSE",
+      "AGENT_TRIGGER_OBLIGATION",
     ]);
 
     const allowed =
@@ -496,6 +742,13 @@ export function applyDecisionEvent(
     "SET_ROLLBACK_PLAN",
     "ASSIGN_RESPONSIBILITY",
     "ACCEPT_RISK",
+    "SET_TRUST_POLICY",
+    "ASSERT_TRUST_ORIGIN",
+    // ✅ Feature 18
+    "AGENT_PROPOSE",
+    "AGENT_TRIGGER_OBLIGATION",
+
+
   ];
 
   const isArtifactOnly = t === "ATTACH_ARTIFACTS" || noStateChange || FEATURE13_NO_STATE.includes(t);
@@ -556,22 +809,110 @@ export function applyDecisionEvent(
             },
           }
         : (decision.artifacts ?? {}),
-    history: [
-      ...(decision.history ?? []),
-      {
-        at: now(),
-        type: t,
-        actor_id: (event as any).actor_id ?? null,
-        reason: "reason" in (event as any) ? ((event as any).reason ?? null) : null,
-        meta: (event as any).meta ?? null,
-      },
-    ],
+      history: [
+        ...(decision.history ?? []),
+        {
+          at: now(),
+          type: t,
+          actor_id: (event as any).actor_id ?? null,
+          reason: "reason" in (event as any) ? ((event as any).reason ?? null) : null,
+          meta: (event as any).meta ?? null,
+
+          // ✅ Feature 17: persist trust boundary info in history
+          trust: (event as any).trust ?? null,
+        } as any,
+      ],
   };
 
-  const withDispute = applyDisputeArtifacts(nextBase, event, now());
+  // ✅ Canonicalize amount if provided via ATTACH_ARTIFACTS artifacts.extra.amount
+  const nextBase2 = t === "ATTACH_ARTIFACTS"
+    ? maybeApplyCanonicalAmountFromArtifacts(nextBase)
+    : nextBase;
+
+
+
+  const withDispute = applyDisputeArtifacts(nextBase2, event, now());
+
+
+  // ✅ Feature 18: Agent mutations (no state change)
+  let withAgent: Decision = withDispute;
+  let agentBag = getAgentBag(withAgent);
+  withAgent = setAgentBag(withAgent, agentBag); // ensure canonical exists
+
+  if (t === "AGENT_PROPOSE") {
+    const e: any = e0;
+
+    const entry = {
+      at: nowSecond(),
+      actor_id: (event as any)?.actor_id ?? null,
+      proposed_event_type:
+        typeof e?.proposed_event_type === "string" ? e.proposed_event_type : null,
+      proposal: e?.proposal ?? null,
+      evidence_refs: Array.isArray(e?.evidence_refs) ? e.evidence_refs.map(String) : null,
+    };
+
+    agentBag = {
+      ...agentBag,
+      proposals: [...(agentBag.proposals ?? []), entry].slice(-100),
+    };
+
+    withAgent = setAgentBag(withAgent, agentBag);
+  }
+
+  if (t === "AGENT_TRIGGER_OBLIGATION") {
+    const e: any = e0;
+
+    const obligation_id =
+      typeof e?.obligation_id === "string" ? e.obligation_id :
+      typeof e?.obligationId === "string" ? e.obligationId :
+      "";
+
+    if (obligation_id) {
+      // ensure exec bag exists before mutation
+      let tmp: Decision = withAgent;
+      let execBag = getExecBag(tmp);
+      tmp = setExecBag(tmp, execBag);
+
+      const existing = execBag.obligations.find((x) => x?.obligation_id === obligation_id) ?? null;
+      const created_at =
+        existing && typeof existing.created_at === "string" && existing.created_at.length
+          ? existing.created_at
+          : now();
+
+      const obligationCandidate = {
+        obligation_id,
+        title: typeof e?.title === "string" ? e.title : `Agent obligation: ${obligation_id}`,
+        description: typeof e?.description === "string" ? e.description : null,
+        owner_id: (event as any)?.actor_id ?? null, // or null if you prefer
+        created_at,
+        due_at: typeof e?.due_at === "string" ? e.due_at : null,
+        grace_seconds: 0,
+        severity: "WARN",
+        status:
+          existing && typeof existing.status === "string" && existing.status.length
+            ? existing.status
+            : "OPEN",
+        fulfilled_at: existing?.fulfilled_at ?? null,
+        waived_at: existing?.waived_at ?? null,
+        waived_reason: existing?.waived_reason ?? null,
+        proof: existing?.proof ?? undefined,
+        tags: (e?.tags && typeof e.tags === "object" ? e.tags : (existing?.tags ?? {})) as any,
+      };
+
+      let obl: any = obligationCandidate;
+      try { obl = ObligationSchema.parse(obligationCandidate); } catch {}
+
+      execBag = normalizeExecBag({
+        ...execBag,
+        obligations: upsertObligationArray(execBag.obligations, obl),
+      });
+
+      withAgent = setExecBag(tmp, execBag);
+    }
+  }
 
   // ✅ Feature 15: PLS mutations (no state change)
-  let withPLS: Decision = withDispute;
+  let withPLS: Decision = withAgent;
   let pls = getPLSBag(withPLS);
   withPLS = setPLSBag(withPLS, pls); // ensure canonical location exists
 
@@ -589,7 +930,7 @@ export function applyDecisionEvent(
           valid_from: r.valid_from != null ? String(r.valid_from) : null,
           valid_to: r.valid_to != null ? String(r.valid_to) : null,
           notes: r.notes != null ? String(r.notes) : null,
-          assigned_at: isoToSecond(now()),
+          assigned_at: nowSecond(),
           assigned_by: (event as any)?.actor_id ?? null,
         },
       });
@@ -611,15 +952,53 @@ export function applyDecisionEvent(
           ticket: a.ticket != null ? String(a.ticket) : null,
           expires_at: a.expires_at != null ? String(a.expires_at) : null,
           signer_state_hash: a.signer_state_hash != null ? String(a.signer_state_hash) : null,
-          accepted_at: isoToSecond(now()),
+          accepted_at: nowSecond(),
         },
       });
       withPLS = setPLSBag(withPLS, pls);
     }
   }
 
-  // Continue existing logic from withRisk using withPLS as base:
-  let withRisk: Decision = withPLS;
+
+  // ✅ Feature 17: Trust boundary mutations (no state change)
+  let withTrust: Decision = withPLS;
+  let trustBag = getTrustBag(withTrust);
+  withTrust = setTrustBag(withTrust, trustBag); // ensure canonical exists
+
+  if (t === "SET_TRUST_POLICY") {
+    const e: any = e0;
+    const p = e?.policy ?? null;
+    if (p && typeof p === "object") {
+      trustBag = {
+        ...trustBag,
+        policy: p,
+        last_updated_at: nowSecond(),
+        last_updated_by: (event as any)?.actor_id ?? null,
+      };
+      withTrust = setTrustBag(withTrust, trustBag);
+    }
+  }
+
+  if (t === "ASSERT_TRUST_ORIGIN") {
+    const e: any = e0;
+    const origin = e?.origin ?? null;
+    if (origin && typeof origin === "object") {
+      const entry = {
+        at: nowSecond(),
+        actor_id: (event as any)?.actor_id ?? null,
+        origin,
+      };
+      trustBag = {
+        ...trustBag,
+        asserted_origins: [...(trustBag.asserted_origins ?? []), entry].slice(-50),
+      };
+      withTrust = setTrustBag(withTrust, trustBag);
+    }
+  }
+  
+
+  // ---- Feature 15 risk mutations ----
+  let withRisk: Decision = withTrust;
 
   if (t === "SET_RISK") {
     const e: any = e0;
@@ -658,13 +1037,11 @@ export function applyDecisionEvent(
     });
   }
 
-  // ---- Feature 13 execution mutations ----
-  let withExec: Decision = withRisk;
+  
 
-  // normalize execution bag from the decision itself
+
+  let withExec: Decision = withRisk;  
   let exec = getExecBag(withExec);
-
-  // Ensure canonical location exists (artifacts.execution + artifacts.extra.execution)
   withExec = setExecBag(withExec, exec);
 
   // Legacy
@@ -694,7 +1071,7 @@ export function applyDecisionEvent(
           vv?.violation_id === vid || vv?.id === vid
             ? {
                 ...vv,
-                resolved_at: isoToSecond(now()),
+                resolved_at: nowSecond(),
                 resolved_by: (event as any).actor_id ?? "system",
                 resolution_note: typeof note === "string" ? note : null,
               }
@@ -704,6 +1081,12 @@ export function applyDecisionEvent(
       withExec = setExecBag(withExec, exec);
     }
   }
+
+   
+
+
+
+
 
   if (t === "ADD_OBLIGATION") {
     const e: any = e0;
@@ -891,6 +1274,7 @@ export function applyDecisionEvent(
     withExec = setExecBag(withExec, exec);
   }
   
+  
 
   // -----------------------------------------
   // SAFEGUARD: prevent evaluateExecution from wiping/rewriting obligations
@@ -1010,16 +1394,19 @@ export function applyDecisionEvent(
   } catch {
     exec = normalizeExecBag({
       ...beforeEval,
-      last_evaluated_at: isoToSecond(now()),
+      last_evaluated_at: nowSecond(),
     });
     withExec = setExecBag(withExec, exec);
   }
 
-  // accountability (IMPORTANT: preserve execution bag if accountability mutates artifacts)
+  // accountability (IMPORTANT: preserve bags if accountability mutates artifacts)
   const next0 = applyAccountability(withExec, event);
 
-  // Re-attach execution bag from withExec (prevents it getting wiped)
-  const next = setExecBag(next0 as any, getExecBag(withExec));
+  // Re-attach bags (prevents wipe)
+  const next1 = setExecBag(next0 as any, getExecBag(withExec));
+  const next2 = setTrustBag(next1 as any, getTrustBag(withTrust));
+  const next3 = setPLSBag(next2 as any, getPLSBag(withPLS));
+  const next  = setAgentBag(next3 as any, getAgentBag(withAgent));
 
   // ✅ Feature 14: provenance (cryptographic lineage)
   const nextWithProv = applyProvenanceTransition({

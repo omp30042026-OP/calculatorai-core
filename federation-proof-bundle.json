@@ -1,0 +1,115 @@
+{
+  "kind": "VERITASCALE_FEDERATION_PROOF_BUNDLE_V1",
+  "generated_at": "2026-01-26T02:42:08.596Z",
+  "federation_id": "FED_CHARGEBACK_001",
+  "from_seq": 1,
+  "to_seq": 3,
+  "ledger_entries": [
+    {
+      "seq": 1,
+      "at": "2026-01-26T02:42:08.594Z",
+      "tenant_id": "TENANT_A",
+      "type": "FEDERATION_EVENT_PROPOSED",
+      "decision_id": "FED_CHARGEBACK_001",
+      "event_seq": 1,
+      "snapshot_up_to_seq": null,
+      "anchor_seq": null,
+      "payload": {
+        "federation_id": "FED_CHARGEBACK_001",
+        "purpose": "CHARGEBACK_EVIDENCE",
+        "payload": {
+          "chargeback_id": "CB_7781",
+          "amount": 129.99,
+          "currency": "USD",
+          "merchant_claim": "DELIVERED",
+          "evidence": {
+            "delivery_scan": "proof://scan/abc",
+            "gps": "proof://gps/xyz"
+          }
+        },
+        "payload_hash": "d98ea4bc0e20f3401079283709f1100bdfcdec9350a0b6196a86b57d2d55a9da",
+        "event_hash": "2255473dfa7bf21d6763e9d7cc61c5ab5217f234e5f8872a328863b32ec370ab",
+        "tenant_a": "TENANT_A",
+        "tenant_b": "TENANT_B",
+        "status": "PROPOSED"
+      },
+      "prev_hash": null,
+      "hash": "8b5ce97a37a74d80806ed351c0ae10e4658db9a8dbcab3e63e25c733ca9d6daa",
+      "sig_alg": "HMAC_SHA256",
+      "key_id": "K_TENANT_A_V1",
+      "sig": "l3/YITeyVttJE+iGY3eVEygicGxrdNjg8Jn7SaL2qOc="
+    },
+    {
+      "seq": 2,
+      "at": "2026-01-26T02:42:08.595Z",
+      "tenant_id": "TENANT_B",
+      "type": "FEDERATION_EVENT_COSIGNED",
+      "decision_id": "FED_CHARGEBACK_001",
+      "event_seq": 2,
+      "snapshot_up_to_seq": null,
+      "anchor_seq": null,
+      "payload": {
+        "federation_id": "FED_CHARGEBACK_001",
+        "purpose": "CHARGEBACK_EVIDENCE",
+        "payload": {
+          "chargeback_id": "CB_7781",
+          "amount": 129.99,
+          "currency": "USD",
+          "merchant_claim": "DELIVERED",
+          "evidence": {
+            "delivery_scan": "proof://scan/abc",
+            "gps": "proof://gps/xyz"
+          }
+        },
+        "payload_hash": "d98ea4bc0e20f3401079283709f1100bdfcdec9350a0b6196a86b57d2d55a9da",
+        "event_hash": "2255473dfa7bf21d6763e9d7cc61c5ab5217f234e5f8872a328863b32ec370ab",
+        "tenant_a": "TENANT_A",
+        "tenant_b": "TENANT_B",
+        "status": "CO_SIGNED"
+      },
+      "prev_hash": "8b5ce97a37a74d80806ed351c0ae10e4658db9a8dbcab3e63e25c733ca9d6daa",
+      "hash": "1875411024263f52f1ac9121c165829c0ce28110222913bfd00cb47d254d430d",
+      "sig_alg": "HMAC_SHA256",
+      "key_id": "K_TENANT_B_V1",
+      "sig": "YhR2t1D8Tyw0MERzeLZjiqU5q2XxoaQvUZVxYdYFydY="
+    },
+    {
+      "seq": 3,
+      "at": "2026-01-26T02:42:08.595Z",
+      "tenant_id": "TENANT_A",
+      "type": "FEDERATION_EVENT_CHALLENGED",
+      "decision_id": "FED_CHARGEBACK_001",
+      "event_seq": 3,
+      "snapshot_up_to_seq": null,
+      "anchor_seq": null,
+      "payload": {
+        "federation_id": "FED_CHARGEBACK_001",
+        "purpose": "CHARGEBACK_EVIDENCE",
+        "payload": {
+          "chargeback_id": "CB_7781",
+          "amount": 129.99,
+          "currency": "USD",
+          "merchant_claim": "DELIVERED",
+          "evidence": {
+            "delivery_scan": "proof://scan/abc",
+            "gps": "proof://gps/xyz"
+          }
+        },
+        "payload_hash": "d98ea4bc0e20f3401079283709f1100bdfcdec9350a0b6196a86b57d2d55a9da",
+        "tenant_a": "TENANT_A",
+        "tenant_b": "TENANT_B",
+        "status": "DISPUTED",
+        "challenged": {
+          "at": "2026-01-26T02:42:08.595Z",
+          "by_tenant": "TENANT_A",
+          "reason": "Customer claims non-delivery; request arbitration."
+        }
+      },
+      "prev_hash": "1875411024263f52f1ac9121c165829c0ce28110222913bfd00cb47d254d430d",
+      "hash": "73917b1c6e186f4a65d9ad25557baaf30ad1ed0fdbc93ee09d1b6b334ce432e2",
+      "sig_alg": null,
+      "key_id": null,
+      "sig": null
+    }
+  ]
+}

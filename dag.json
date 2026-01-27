@@ -1,0 +1,40 @@
+{
+  "kind": "DECISION_DAG_V1",
+  "decision_id": "dec_exec_001",
+  "direction": "BOTH",
+  "nodes": [
+    {
+      "decision_id": "dec_child_003",
+      "node_hash": "d174c02dc12da787df99a062018a521e7a18d8aadc4b883c12436d07fce8f7ed"
+    },
+    {
+      "decision_id": "dec_exec_001",
+      "node_hash": "e3c7a77d8869cd4878f3f39abc78bb61c543dbfb20b469892aa2481f52c035cd"
+    },
+    {
+      "decision_id": "dec_other_002",
+      "node_hash": "4ae2549f1ade219a1717812cd2254f0313a761f090791a9d01df59f9314aeac2"
+    }
+  ],
+  "edges": [
+    {
+      "from_decision_id": "dec_child_003",
+      "to_decision_id": "dec_exec_001",
+      "relation": "DEPENDS_ON",
+      "via_event_seq": 1,
+      "edge_hash": "889476a18ef398fdceae8eeed52bd174f16f84ec01fc5fb63e58e9f4c272ecc2",
+      "meta_json": "{\"confidence\":0.91,\"note\":\"child depends on exec\"}",
+      "created_at": "2026-01-26T23:41:49.966Z"
+    },
+    {
+      "from_decision_id": "dec_exec_001",
+      "to_decision_id": "dec_other_002",
+      "relation": "DERIVES_FROM",
+      "via_event_seq": 1,
+      "edge_hash": "d6f0f2752b5205841b3c7cd1211c92b774cc16523e87cc9d2fcfb5f0366f2af1",
+      "meta_json": "{\"confidence\":0.92,\"note\":\"This decision was derived from the other one\"}",
+      "created_at": "2026-01-26T23:41:49.964Z"
+    }
+  ],
+  "dag_hash": "d70d6dfa4f648c7ff06bb11bacc39049da3aa996d25dacb21e3491ab10b00fd8"
+}

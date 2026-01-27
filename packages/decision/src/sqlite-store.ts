@@ -26,6 +26,31 @@ import { computeLedgerEntryHash, signLedgerHash,verifyLedgerEntries } from "./le
 import type { LedgerSigner, LedgerVerifier } from "./ledger-signing.js";
 import type { VerifyLedgerOptions } from "./ledger-store.js";
 
+
+import { ensureEnterpriseTables } from "./enterprise-schema.js";
+
+
+import type { DecisionEdgeDirection, DecisionEdgeRecord, DecisionRoleRecord } from "./store.js";
+
+
+// ✅ Feature 15: PLS record (auditable)
+export type PlsShieldRecord = {
+  decision_id: string;
+  event_seq: number;
+  event_type: string;
+
+  owner_id: string;
+  approver_id: string;
+
+  signer_state_hash: string;
+
+  payload_json: string | null;
+  shield_hash: string;
+
+  created_at: string;
+};
+
+
 // ---------------------------------
 // Feature 17: hash-chain utilities
 // ---------------------------------
@@ -57,6 +82,38 @@ function sha256Hex(s: string): string {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
 
+// ---------------------------------
+// Feature 14: Decision Provenance Graph (DAG) - edge input
+// ---------------------------------
+export type DecisionEdgeInput = {
+  from_decision_id: string;
+  to_decision_id: string;
+  relation: string;
+  via_event_seq: number;
+  meta?: unknown;
+  created_at: string;
+};
+
+// ---------------------------------
+// Feature 14: Decision Provenance Graph (DAG) - edge record (read)
+// ---------------------------------
+type SqliteDecisionEdgeRecord = {
+  from_decision_id: string;
+  to_decision_id: string;
+  relation: string;
+  via_event_seq: number;
+  edge_hash: string;
+  meta_json: string | null;
+  created_at: string;
+};
+
+
+
+
+
+
+
+
 function computeEventHash(input: {
   decision_id: string;
   seq: number;
@@ -83,6 +140,37 @@ function computeEventHash(input: {
 function computeStateHash(decision: unknown): string {
   return sha256Hex(stableStringify(decision));
 }
+
+
+
+// ✅ Feature 15: PLS shield hash (canonical)
+function computePlsShieldHash(payload: {
+  decision_id: string;
+  event_seq: number;
+  event_type: string;
+  owner_id: string;
+  approver_id: string;
+  signer_state_hash: string;
+  payload_json: string | null;
+  created_at: string;
+}): string {
+  return sha256Hex(
+    stableStringify({
+      kind: "PLS_SHIELD_V1",
+      decision_id: payload.decision_id,
+      event_seq: payload.event_seq,
+      event_type: payload.event_type,
+      owner_id: payload.owner_id,
+      approver_id: payload.approver_id,
+      signer_state_hash: payload.signer_state_hash,
+      payload_json: payload.payload_json,
+      created_at: payload.created_at,
+    })
+  );
+}
+
+
+
 
 // ---------------------------------
 // Feature 21: Merkle root of hashes
@@ -115,10 +203,12 @@ export class SqliteDecisionStore
 
   constructor(filename: string) {
     this.db = new Database(filename);
+    ensureEnterpriseTables(this.db);
     this.db.pragma("journal_mode = WAL");
     this.db.pragma("foreign_keys = ON");
     this.init();
   }
+  
 
   private init() {
     // decisions
@@ -252,6 +342,8 @@ export class SqliteDecisionStore
       this.ensureColumn("enterprise_ledger", "sig", "TEXT");
 
 
+      
+
   }
 
   private ensureColumn(table: string, column: string, type: string) {
@@ -271,9 +363,10 @@ export class SqliteDecisionStore
     const missingRow = this.db
       .prepare(
         `SELECT 1 AS x
-         FROM decision_events
-         WHERE hash IS NULL OR hash='' OR prev_hash IS NULL
-         LIMIT 1;`
+        FROM decision_events
+        WHERE (hash IS NULL OR hash = '')
+            OR (seq > 1 AND (prev_hash IS NULL OR prev_hash = ''))
+        LIMIT 1;`
       )
       .get() as { x: 1 } | undefined;
 
@@ -342,6 +435,183 @@ export class SqliteDecisionStore
     }
   }
 
+  // ---------------------------------
+  // ✅ Feature 15: PLS reads (audit-grade)
+  // ---------------------------------
+  async getLiabilityShield(decision_id: string, event_seq: number): Promise<PlsShieldRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT decision_id,event_seq,event_type,owner_id,approver_id,signer_state_hash,payload_json,shield_hash,created_at
+        FROM pls_shields
+        WHERE decision_id=? AND event_seq=?
+        LIMIT 1;`
+      )
+      .get(decision_id, Number(event_seq)) as any;
+
+    if (!row) return null;
+
+    return {
+      decision_id: String(row.decision_id),
+      event_seq: Number(row.event_seq),
+      event_type: String(row.event_type),
+
+      owner_id: String(row.owner_id),
+      approver_id: String(row.approver_id),
+
+      signer_state_hash: String(row.signer_state_hash),
+
+      payload_json: row.payload_json == null ? null : String(row.payload_json),
+      shield_hash: String(row.shield_hash),
+
+      created_at: String(row.created_at),
+    };
+  }
+
+  async getLatestLiabilityShield(decision_id: string): Promise<PlsShieldRecord | null> {
+    const row = this.db
+      .prepare(
+        `SELECT decision_id,event_seq,event_type,owner_id,approver_id,signer_state_hash,payload_json,shield_hash,created_at
+        FROM pls_shields
+        WHERE decision_id=?
+        ORDER BY event_seq DESC
+        LIMIT 1;`
+      )
+      .get(decision_id) as any;
+
+    if (!row) return null;
+
+    return {
+      decision_id: String(row.decision_id),
+      event_seq: Number(row.event_seq),
+      event_type: String(row.event_type),
+
+      owner_id: String(row.owner_id),
+      approver_id: String(row.approver_id),
+
+      signer_state_hash: String(row.signer_state_hash),
+
+      payload_json: row.payload_json == null ? null : String(row.payload_json),
+      shield_hash: String(row.shield_hash),
+
+      created_at: String(row.created_at),
+    };
+  }
+
+  // Optional: verify a stored PLS row is internally consistent
+  async verifyLiabilityShieldRow(decision_id: string, event_seq: number): Promise<{
+    ok: boolean;
+    error?: string;
+    expected_shield_hash?: string;
+    actual_shield_hash?: string;
+  }> {
+    const r = await this.getLiabilityShield(decision_id, event_seq);
+    if (!r) return { ok: false, error: "PLS_NOT_FOUND" };
+
+    const expected = computePlsShieldHash({
+      decision_id: r.decision_id,
+      event_seq: r.event_seq,
+      event_type: r.event_type,
+      owner_id: r.owner_id,
+      approver_id: r.approver_id,
+      signer_state_hash: r.signer_state_hash,
+      payload_json: r.payload_json,
+      created_at: r.created_at,
+    });
+
+    if (expected !== r.shield_hash) {
+      return {
+        ok: false,
+        error: "PLS_SHIELD_HASH_MISMATCH",
+        expected_shield_hash: expected,
+        actual_shield_hash: r.shield_hash,
+      };
+    }
+
+    return { ok: true };
+  }
+
+
+
+  // ---------------------------------
+  // ✅ Feature 18: RBAC role management (decision_roles)
+  // ---------------------------------
+  async grantRole(
+    decision_id: string,
+    actor_id: string,
+    role: string,
+    created_at?: string
+  ): Promise<void> {
+    const at =
+      typeof created_at === "string" && created_at.length
+        ? created_at
+        : new Date().toISOString();
+
+    // idempotent via PRIMARY KEY (decision_id, actor_id, role)
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO decision_roles(decision_id, actor_id, role, created_at)
+         VALUES (?, ?, ?, ?);`
+      )
+      .run(String(decision_id), String(actor_id), String(role), at);
+  }
+
+  async revokeRole(decision_id: string, actor_id: string, role: string): Promise<void> {
+    this.db
+      .prepare(
+        `DELETE FROM decision_roles
+         WHERE decision_id=? AND actor_id=? AND role=?;`
+      )
+      .run(String(decision_id), String(actor_id), String(role));
+  }
+
+  async listRoles(decision_id: string, actor_id?: string): Promise<DecisionRoleRecord[]> {
+    const rows = actor_id
+      ? (this.db
+          .prepare(
+            `SELECT decision_id, actor_id, role, created_at
+             FROM decision_roles
+             WHERE decision_id=? AND actor_id=?
+             ORDER BY created_at ASC;`
+          )
+          .all(String(decision_id), String(actor_id)) as any[])
+      : (this.db
+          .prepare(
+            `SELECT decision_id, actor_id, role, created_at
+             FROM decision_roles
+             WHERE decision_id=?
+             ORDER BY actor_id ASC, role ASC;`
+          )
+          .all(String(decision_id)) as any[]);
+
+    return rows.map((r) => ({
+      decision_id: String(r.decision_id),
+      actor_id: String(r.actor_id),
+      role: String(r.role),
+      created_at: String(r.created_at),
+    }));
+  }
+
+  async hasAnyRole(decision_id: string, actor_id: string, roles: string[]): Promise<boolean> {
+    const list = Array.isArray(roles) ? roles.map(String).filter(Boolean) : [];
+    if (list.length === 0) return false;
+
+    // Build (?, ?, ?) safely
+    const placeholders = list.map(() => "?").join(",");
+    const row = this.db
+      .prepare(
+        `SELECT 1 AS ok
+         FROM decision_roles
+         WHERE decision_id=? AND actor_id=? AND role IN (${placeholders})
+         LIMIT 1;`
+      )
+      .get(String(decision_id), String(actor_id), ...list) as any;
+
+    return !!row?.ok;
+  }
+
+
+
+
   // -----------------------------
   // Optional transactional helper (async + nested)
   // -----------------------------
@@ -378,6 +648,119 @@ export class SqliteDecisionStore
       throw e;
     }
   }
+
+
+  // ---------------------------------
+  // ✅ Feature 14: DAG persistence (decision_edges)
+  // ---------------------------------
+  insertDecisionEdges(edges: DecisionEdgeInput[]): void {
+    if (!edges || edges.length === 0) return;
+
+    const stmt = this.db.prepare(`
+      INSERT OR IGNORE INTO decision_edges (
+        from_decision_id,
+        to_decision_id,
+        relation,
+        via_event_seq,
+        edge_hash,
+        meta_json,
+        created_at
+      ) VALUES (
+        @from_decision_id,
+        @to_decision_id,
+        @relation,
+        @via_event_seq,
+        @edge_hash,
+        @meta_json,
+        @created_at
+      );
+    `);
+
+    const tx = this.db.transaction((rows: any[]) => {
+      for (const r of rows) stmt.run(r);
+    });
+
+    const rows = edges.map((e) => {
+      const meta_json =
+        typeof e.meta === "undefined" ? null : stableStringify(e.meta);
+
+      const edge_hash = sha256Hex(
+        stableStringify({
+          from_decision_id: e.from_decision_id,
+          to_decision_id: e.to_decision_id,
+          relation: e.relation,
+          via_event_seq: e.via_event_seq,
+          meta_json,
+        })
+      );
+
+      return {
+        from_decision_id: e.from_decision_id,
+        to_decision_id: e.to_decision_id,
+        relation: e.relation,
+        via_event_seq: e.via_event_seq,
+        edge_hash,
+        meta_json,
+        created_at: e.created_at,
+      };
+    });
+
+    tx(rows);
+  }
+
+
+   // ---------------------------------
+  // ✅ Feature 14: DAG reads (upstream/downstream)
+  
+  
+  // ---------------------------------
+  // ✅ Feature 14: DAG read API
+  // ---------------------------------
+  async listDecisionEdges(
+    decision_id: string,
+    direction: "UPSTREAM" | "DOWNSTREAM"
+  ): Promise<DecisionEdgeRecord[]> {
+    const dir = String(direction);
+
+    // IMPORTANT:
+    // Your semantics are:
+    // from_decision_id = the decision that "derives from" / "depends on" the to_decision_id.
+    // So:
+    // - UPSTREAM of X: rows WHERE from_decision_id = X
+    // - DOWNSTREAM of X: rows WHERE to_decision_id = X
+    const where =
+      dir === "DOWNSTREAM"
+        ? "to_decision_id = ?"
+        : "from_decision_id = ?";
+
+    const rows = this.db
+      .prepare(
+        `SELECT
+           from_decision_id,
+           to_decision_id,
+           relation,
+           via_event_seq,
+           edge_hash,
+           meta_json,
+           created_at
+         FROM decision_edges
+         WHERE ${where}
+         ORDER BY via_event_seq ASC, id ASC;`
+      )
+      .all(decision_id) as any[];
+
+    return rows.map((r) => ({
+      from_decision_id: String(r.from_decision_id),
+      to_decision_id: String(r.to_decision_id),
+      relation: String(r.relation),
+      via_event_seq: Number(r.via_event_seq),
+      edge_hash: String(r.edge_hash),
+      meta_json: r.meta_json == null ? null : String(r.meta_json),
+      created_at: String(r.created_at),
+    }));
+  }
+  
+
 
   // -----------------------------
   // decisions
@@ -744,15 +1127,22 @@ export class SqliteDecisionStore
       hash: string | null;
     }>;
 
-    return rows.map((r) => ({
+    return rows.map((r) => {
+  const ev = JSON.parse(r.event_json) as any;
+
+  // ✅ CRITICAL: ensure deterministic replay/public hashing
+  if (!ev.at && r.at) ev.at = r.at;
+
+  return {
       decision_id: r.decision_id,
       seq: r.seq,
       at: r.at,
-      event: JSON.parse(r.event_json) as DecisionEvent,
+      event: ev as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
       prev_hash: r.prev_hash ?? null,
       hash: r.hash ?? null,
-    }));
+    };
+  });
   }
 
   async listEventsFrom(
@@ -776,15 +1166,22 @@ export class SqliteDecisionStore
       hash: string | null;
     }>;
 
-    return rows.map((r) => ({
+  return rows.map((r) => {
+    const ev = JSON.parse(r.event_json) as any;
+
+    // ✅ CRITICAL: ensure deterministic replay/public hashing
+    if (!ev.at && r.at) ev.at = r.at;
+
+    return {
       decision_id: r.decision_id,
       seq: r.seq,
       at: r.at,
-      event: JSON.parse(r.event_json) as DecisionEvent,
+      event: ev as DecisionEvent,
       idempotency_key: r.idempotency_key ?? null,
       prev_hash: r.prev_hash ?? null,
       hash: r.hash ?? null,
-    }));
+    };
+  });
   }
 
   async listEventsTail(
@@ -850,11 +1247,16 @@ export class SqliteDecisionStore
 
     if (!row) return null;
 
+    const ev = JSON.parse(row.event_json) as any;
+
+    // ✅ CRITICAL: ensure deterministic replay/public hashing
+    if (!ev.at && row.at) ev.at = row.at;
+
     return {
       decision_id: row.decision_id,
       seq: row.seq,
       at: row.at,
-      event: JSON.parse(row.event_json) as DecisionEvent,
+      event: ev as DecisionEvent,
       idempotency_key: row.idempotency_key ?? null,
       prev_hash: row.prev_hash ?? null,
       hash: row.hash ?? null,

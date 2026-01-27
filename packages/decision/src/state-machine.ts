@@ -29,9 +29,14 @@ export type DecisionEventType =
   | "SET_RISK"
   | "ADD_BLAST_RADIUS"
   | "ADD_IMPACTED_SYSTEM"
-  | "SET_ROLLBACK_PLAN";
-
-   
+  | "SET_ROLLBACK_PLAN"
+  // ✅ Feature 17: Trust Boundary foundation
+  | "SET_TRUST_POLICY"
+  | "ASSERT_TRUST_ORIGIN"
+   // ✅ Feature 18: Autonomous Decision Agents
+  | "AGENT_PROPOSE"
+  | "AGENT_TRIGGER_OBLIGATION"
+  | "SET_AMOUNT";
 
 /**
  * Events that should NOT change DecisionState.
@@ -49,7 +54,12 @@ export type NoStateChangeEventType =
   | "ADD_OBLIGATION"
   | "FULFILL_OBLIGATION"
   | "WAIVE_OBLIGATION"
-  | "ATTEST_EXECUTION";
+  | "ATTEST_EXECUTION"
+  | "SET_TRUST_POLICY"
+  | "ASSERT_TRUST_ORIGIN"
+  // ✅ Feature 18
+  | "AGENT_PROPOSE"
+  | "AGENT_TRIGGER_OBLIGATION";
 
 export function isNoStateChangeEvent(
   t: DecisionEventType
@@ -66,7 +76,12 @@ export function isNoStateChangeEvent(
     case "FULFILL_OBLIGATION":
     case "WAIVE_OBLIGATION":
     case "ATTEST_EXECUTION":
+    case "SET_TRUST_POLICY":
+    case "ASSERT_TRUST_ORIGIN":
+    case "AGENT_PROPOSE":
+    case "AGENT_TRIGGER_OBLIGATION":
       return true;
+      
     default:
       return false;
   }
@@ -99,9 +114,14 @@ export function transitionDecisionState(
       return "REJECTED";
     }
     case "SET_RISK":
-    case "ADD_BLAST_RADIUS":
+    case "ADD_BLAST_RADIUS": 
     case "ADD_IMPACTED_SYSTEM":
     case "SET_ROLLBACK_PLAN":
+    
+    case "SET_AMOUNT": {
+      return state; // no state transition; just patches fields in engine reducer
+    }
+    
       return state; // or return current state (no state change)
     default: {
       const _exhaustive: never = eventType;

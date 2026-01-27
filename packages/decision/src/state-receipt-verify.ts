@@ -1,5 +1,6 @@
 // packages/decision/src/state-receipt-verify.ts
 import crypto from "node:crypto";
+import { computeDecisionStateHash } from "./state-hash.js";
 
 function stableStringify(value: unknown): string {
   const seen = new WeakSet<object>();
@@ -29,9 +30,7 @@ function sha256Hex(s: string): string {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
 
-export function computeDecisionStateHash(decision: unknown): string {
-  return sha256Hex(stableStringify(decision));
-}
+export { computeDecisionStateHash };
 
 /**
  * Works with:

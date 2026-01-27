@@ -1,0 +1,74 @@
+{
+  "ok": true,
+  "decision_id": "dec_exec_001",
+  "checks": {
+    "decision_exists": {
+      "ok": true
+    },
+    "receipts_exist": {
+      "ok": true,
+      "details": {
+        "count": 5
+      }
+    },
+    "events_exist": {
+      "ok": true,
+      "details": {
+        "count": 5
+      }
+    },
+    "workflow_complete": {
+      "ok": true,
+      "details": {
+        "satisfied_steps": {
+          "s1_require_amount": true,
+          "s2_require_validate": true,
+          "s3_require_approve_or_reject": true,
+          "is_complete": true,
+          "amount": {
+            "value": 199.99,
+            "currency": "USD"
+          }
+        }
+      }
+    },
+    "receipt_chain_ok": {
+      "ok": true,
+      "details": {
+        "schema": {
+          "has_prev_hash": false,
+          "has_hash": false
+        },
+        "problems": []
+      }
+    },
+    "pls_binding_ok": {
+      "ok": true,
+      "details": {
+        "signer_state_hash": "b2bbb59b594282657dce1849de777cfbe5e084cc6f7cdd2ab37e474ceff199aa",
+        "simulate_state_after_hash": "b2bbb59b594282657dce1849de777cfbe5e084cc6f7cdd2ab37e474ceff199aa",
+        "hint": "OK"
+      }
+    },
+    "latest_seq_alignment": {
+      "ok": true,
+      "details": {
+        "latest_receipt_event_seq": 5,
+        "latest_event_seq": 5,
+        "note": "For full DECISION_PUBLIC_HASH_MISMATCH verification, wire in the same public-hash function used by liability hashing."
+      }
+    }
+  },
+  "summary": {
+    "state": "APPROVED",
+    "amount_value": 199.99,
+    "amount_currency": "USD",
+    "receipts_count": 5,
+    "latest_event_seq": 5,
+    "latest_event_type": "EXPLAIN",
+    "latest_state_after_hash": "e17e2dc7184c795a875a60e4107f9cfedf8241a830b38e7da145f84cce0e230f",
+    "approve_signer_state_hash": "b2bbb59b594282657dce1849de777cfbe5e084cc6f7cdd2ab37e474ceff199aa",
+    "simulate_state_after_hash": "b2bbb59b594282657dce1849de777cfbe5e084cc6f7cdd2ab37e474ceff199aa",
+    "verified_at": "2026-01-27T03:25:00.683Z"
+  }
+}
