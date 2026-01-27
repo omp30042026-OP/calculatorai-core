@@ -139,3 +139,7 @@ export function shouldPruneEventsAfterSnapshot(
   return !!retention?.prune_events_up_to_latest_snapshot;
 }
 
+
+/** Back-compat alias (older code may refer to SnapshotStore) */
+export type SnapshotStore = DecisionSnapshotStore;
+

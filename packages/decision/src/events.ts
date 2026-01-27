@@ -12,7 +12,127 @@ const ActorIdSchema = z
   .optional()
   .transform((v) => (v && v.length ? v : undefined));
 
-const ActorTypeSchema = z.enum(["human", "service", "system"]).optional();
+const ActorTypeSchema = z.enum(["human", "service", "system", "agent"]).optional();
+
+const TrustZoneCompatSchema = z
+  .enum(["TEAM", "ORG", "VENDOR", "EXTERNAL", "INTERNAL", "PARTNER", "PUBLIC"])
+  .transform((z) => {
+    if (z === "INTERNAL") return "ORG";
+    if (z === "PUBLIC") return "EXTERNAL";
+    if (z === "PARTNER") return "VENDOR"; // or ORG depending on your semantics
+    return z;
+  });
+
+
+// ✅ Feature 17: Trust Boundary (foundation)
+const TrustZoneSchema = z.enum([
+  "INTERNAL",
+  "PARTNER",
+  "VENDOR",
+  "PUBLIC",
+  // legacy/back-compat (because your stored trust policy already uses ORG)
+  "ORG",
+  "TEAM",
+  "EXTERNAL",
+]).optional();
+
+const EventOriginSchema = z
+  .object({
+    system: z.string().optional(),
+    source: z.string().optional(),
+    ip: z.string().optional(),
+    user_agent: z.string().optional(),
+    request_id: z.string().optional(),
+  })
+  .partial()
+  .optional();
+
+const TrustBoundarySchema = z
+  .object({
+    zone: TrustZoneSchema,
+    origin: EventOriginSchema,
+    asserted_by: z.string().optional(),
+    attested: z.boolean().optional(),
+  })
+  .partial()
+  .optional();
+
+
+// -----------------------------
+// ✅ Feature 17: Trust Boundary foundation (schemas)
+// -----------------------------
+const TrustZoneIdSchema = z.string().trim().min(1);
+
+const TrustOriginSchema = z
+  .object({
+    zone: TrustZoneSchema,                // e.g. "INTERNAL", "PARTNER", "PUBLIC"
+    org_id: z.string().optional(),        // ✅ Feature 19: which org asserted this
+    system: z.string().optional(),        // e.g. "lightspeed", "shopify", "etl-job"
+    channel: z.string().optional(),       // e.g. "api", "ui", "batch", "webhook"
+    ip: z.string().optional(),
+    tenant_id: z.string().optional(),
+    confidence: z.number().min(0).max(1).optional(),
+  })
+  .partial();
+
+// ✅ Feature 17: Evidence + Attestation trust
+const EvidenceRefSchema = z.object({
+  artifact_id: z.string(),
+  type: z.enum(["DOCUMENT", "DATASET", "MODEL_OUTPUT", "EXTERNAL_PROOF"]),
+  hash: z.string(),
+  source_system: z.string().optional(),
+  captured_at: z.string().optional(), // ISO
+}).partial();
+
+const AttestationRefSchema = z.object({
+  attestor_id: z.string(),      // e.g. "docusign", "plaid"
+  payload_hash: z.string(),
+  signature: z.string().optional(),
+  confidence: z.number().min(0).max(1).optional(),
+}).partial();
+
+const TrustEnvelopeSchema = z
+  .object({
+    origin: TrustOriginSchema.optional(),
+    evidence: z.array(EvidenceRefSchema).optional(),
+    attestations: z.array(AttestationRefSchema).optional(),
+    claimed_by: z.string().optional(),
+    asserted_at: z.string().optional(),
+  })
+  .partial();
+
+const TrustPolicySchema = z
+  .object({
+    enabled: z.boolean().default(true),
+
+    // If present, any event without origin.zone is BLOCKed (unless exempt type)
+    require_origin_zone: z.boolean().default(false),
+
+    // Allowed origin zones for writes (if empty => allow all)
+    allowed_origin_zones: z.array(TrustZoneSchema).default([]),
+
+    // Optional: deny-list zones
+    denied_origin_zones: z.array(TrustZoneSchema).default([]),
+
+
+    // ✅ Evidence trust
+    min_evidence: z.number().int().nonnegative().default(0),
+
+    // ✅ Attestation trust
+    required_attestors: z.array(z.string()).default([]),
+    min_attestation_confidence: z.number().min(0).max(1).default(0),
+
+    // Event types that are exempt from origin requirement (bootstrap)
+    exempt_event_types: z.array(z.string()).default([
+      "VALIDATE",
+      "SIMULATE",
+      "EXPLAIN",
+      "SET_TRUST_POLICY",
+      "ASSERT_TRUST_ORIGIN",
+      "ATTACH_ARTIFACTS",
+    ]),
+  })
+  .partial();
 
 // -----------------------------
 // Base event
@@ -22,7 +142,14 @@ const BaseEventSchema = z.object({
   actor_id: ActorIdSchema,
   actor_type: ActorTypeSchema,
   meta: z.record(z.string(), z.unknown()).optional(),
+
+  // ✅ Feature 17 foundation: trust envelope on every event
+  trust: TrustEnvelopeSchema.optional(),
 });
+
+
+
+
 
 // -----------------------------
 // Core lifecycle events
@@ -30,6 +157,19 @@ const BaseEventSchema = z.object({
 export const ValidateEventSchema = BaseEventSchema.extend({
   type: z.literal("VALIDATE"),
 });
+
+export const SetAmountEvent = z.object({
+  type: z.literal("SET_AMOUNT"),
+  actor_id: z.string(),
+  actor_type: z.enum(["human", "system"]).optional(),
+  amount: z.object({
+    value: z.number(),
+    currency: z.string().optional(),
+  }),
+});
+
+
+
 
 export const SimulateEventSchema = BaseEventSchema.extend({
   type: z.literal("SIMULATE"),
@@ -263,8 +403,44 @@ export const AcceptRiskEventSchema = BaseEventSchema.extend({
   }),
 });
 
+// -----------------------------
+// ✅ Feature 17: Trust boundary events
+// -----------------------------
+export const SetTrustPolicyEventSchema = BaseEventSchema.extend({
+  type: z.literal("SET_TRUST_POLICY"),
+  policy: TrustPolicySchema,
+});
+
+export const AssertTrustOriginEventSchema = BaseEventSchema.extend({
+  type: z.literal("ASSERT_TRUST_ORIGIN"),
+  origin: TrustOriginSchema,
+});
 
 
+// -----------------------------
+// ✅ Feature 18: Autonomous Decision Agents (Constrained AI)
+// -----------------------------
+
+export const AgentProposeEventSchema = BaseEventSchema.extend({
+  type: z.literal("AGENT_PROPOSE"),
+  // free-form proposal payload (LLM output, plan, recommendation, etc.)
+  proposal: z.unknown().optional(),
+
+  // optional: what action the agent is proposing the human/system should take next
+  proposed_event_type: z.string().optional(),
+
+  // optional: a pointer to evidence artifacts the agent relied on
+  evidence_refs: z.array(z.string()).optional(),
+});
+
+export const AgentTriggerObligationEventSchema = BaseEventSchema.extend({
+  type: z.literal("AGENT_TRIGGER_OBLIGATION"),
+  obligation_id: z.string(),
+  title: z.string().optional(),
+  description: z.string().optional(),
+  due_at: z.string().optional(), // ISO
+  tags: z.record(z.string(), z.string()).optional(),
+});
 
 
 // -----------------------------
@@ -301,6 +477,17 @@ export const DecisionEventSchema = z.union([
   // ✅ Feature 15: Personal Liability Shield
   AssignResponsibilityEventSchema,
   AcceptRiskEventSchema,
+
+  // ✅ Feature 17
+  SetTrustPolicyEventSchema,
+  AssertTrustOriginEventSchema,
+
+  // ✅ Feature 18
+  AgentProposeEventSchema,
+  AgentTriggerObligationEventSchema,
+
+  SetAmountEvent,
+
 ]);
 
 

@@ -26,6 +26,10 @@ export type DecisionPolicy = (ctx: {
 export function defaultPolicies(): DecisionPolicy[] {
   return [
     requireMetaOnValidatePolicy(),
+
+    // ✅ Feature 18: safety net (agent can’t finalize)
+    agentCannotFinalizePolicy(),
+
     // ✅ Feature 13.4/13.5
     slaEnforcementPolicy({ block_on: "APPROVE" }), // recommended: block at approval time
   ];
@@ -118,5 +122,40 @@ export function slaEnforcementPolicy(opts?: {
     return { ok: false, violations };
   };
 }
+
+/**
+ * ✅ Feature 18: Autonomous agents can NEVER finalize (APPROVE/REJECT)
+ * This is a defense-in-depth safety net even if RBAC/trust-boundary is bypassed.
+ */
+function agentCannotFinalizePolicy(): DecisionPolicy {
+  return ({ event }) => {
+    const actor_type = (event as any)?.actor_type;
+
+    // Only care about agents
+    if (actor_type !== "agent") return { ok: true };
+
+    // Block finalization
+    if (event.type === "APPROVE" || event.type === "REJECT") {
+      return {
+        ok: false,
+        violations: [
+          {
+            code: "AGENT_CANNOT_FINALIZE",
+            severity: "BLOCK",
+            message: `Agent cannot ${event.type}. Requires human gate.`,
+            details: {
+              actor_id: (event as any)?.actor_id ?? null,
+              actor_type,
+              event_type: event.type,
+            },
+          },
+        ],
+      };
+    }
+
+    return { ok: true };
+  };
+}
+
 
 

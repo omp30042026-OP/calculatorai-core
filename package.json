@@ -36,8 +36,11 @@
     "test:ui": "vitest --ui",
     "decision:provenance:tamper": "tsx examples/run-decision-provenance-tamper.ts > /dev/null",
     "decision:summary": "tsx examples/run-decision-summary.ts",
-    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite && npm run decision:snapshots:sqlite && npm run decision:durability:sqlite && npm run decision:retention:sqlite && npm run decision:history:sqlite && npm run decision:fork-history:sqlite && npm run decision:diff:sqlite && npm run decision:audit:sqlite && npm run decision:timeline:sqlite && npm run decision:fork-graph:sqlite && npm run decision:lineage:sqlite && npm run decision:observability:sqlite"
-    
+    "check": "npm run typecheck && npm run explain:single && npm run explain:multi && npm run effects && npm run golden && npm run decision:ok && npm run decision:blocked && npm run decision:required && npm run decision:artifacts && npm run decision:fork && npm run decision:store && npm run decision:store:sqlite && npm run decision:snapshots:sqlite && npm run decision:durability:sqlite && npm run decision:retention:sqlite && npm run decision:history:sqlite && npm run decision:fork-history:sqlite && npm run decision:diff:sqlite && npm run decision:audit:sqlite && npm run decision:timeline:sqlite && npm run decision:fork-graph:sqlite && npm run decision:lineage:sqlite && npm run decision:observability:sqlite",
+    "replay:demo": "tsx examples/run-replay-counterfactual.ts",
+    "replay:store": "tsx examples/run-replay-from-store.ts",
+    "federation:demo": "tsx examples/run-federation-demo.ts",
+    "federation:verify": "tsx examples/run-federation-verify-bundle.ts"
   },
   "author": "",
   "license": "ISC",

@@ -71,8 +71,8 @@ function canonicalDraftRootFromStored(root: Decision): Decision {
   const d = createDecisionV2(
     {
       decision_id: root.decision_id,
+      parent_decision_id: (root as any).parent_decision_id ?? undefined, // ✅ ADD THIS
       meta: (root.meta ?? {}) as any,
-      // IMPORTANT: start empty; replay rebuilds artifacts/history
       artifacts: { extra: {} } as any,
       version: 1,
     } as any,

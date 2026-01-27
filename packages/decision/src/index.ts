@@ -34,7 +34,8 @@ export * from "./store.js";
 export * from "./store-engine.js";
 export * from "./snapshots.js";
 
-export * from "./sqlite-store.js";
+export { SqliteDecisionStore } from "./sqlite-store.js";
+export type { DecisionEdgeInput } from "./sqlite-store.js"; // keep only if you really need it externally
 export * from "./sqlite-snapshot-store.js";
 export * from "./store-history.js";
 export * from "./store-diff.js";
@@ -75,3 +76,29 @@ export * from "./approval-gates.js";
 
 export * from "./compliance-constraints.js";
 
+export * from "./replay-store.js";
+
+export * from "./provenance-graph.js";
+
+export * from "./store-provenance-graph.js";
+
+export type { PlsShieldRecord } from "./store.js";
+
+
+export {
+  rewindDecisionWithStore,
+  replayCounterfactualWithStore,
+  type CounterfactualEdits,
+  type CounterfactualResult,
+  type RewindResult,
+} from "./store-engine.js";
+
+
+export {
+  persistCounterfactualBranchWithStore,
+} from "./store-engine.js";
+
+export type {
+  PersistCounterfactualBranchInput,
+  PersistCounterfactualBranchResult,
+} from "./store-engine.js";

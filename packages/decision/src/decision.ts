@@ -16,11 +16,14 @@ export const DecisionStateSchema = z.enum([
 export type DecisionState = z.infer<typeof DecisionStateSchema>;
 
 export const DecisionHistoryEntrySchema = z.object({
-  at: z.string(), // ISO timestamp
+  at: z.string(),
   type: z.string(),
   actor_id: z.string().nullable(),
   reason: z.string().nullable(),
   meta: z.record(z.string(), z.unknown()).nullable(),
+
+  // ✅ Feature 17: trust envelope (optional)
+  trust: z.unknown().nullable().optional(),
 });
 export type DecisionHistoryEntry = z.infer<typeof DecisionHistoryEntrySchema>;
 

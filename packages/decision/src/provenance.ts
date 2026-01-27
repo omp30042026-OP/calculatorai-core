@@ -36,8 +36,17 @@ export type ProvenanceNode = {
   meta?: Record<string, unknown> | null;
 };
 
+export type ProvenanceEdge = {
+  from: string; // node_id
+  to: string;   // node_id
+  kind: "CAUSES" | "FORKED_FROM" | "MERGED_FROM" | "EVIDENCE" | "APPROVED_BY";
+  meta?: Record<string, unknown> | null;
+};
+
 export type ProvenanceBag = {
   nodes: ProvenanceNode[];
+  edges?: ProvenanceEdge[]; // ✅ NEW: DAG edges
+
   last_node_id: string | null;
   last_node_hash: string | null;
 
@@ -118,13 +127,17 @@ function computeDecisionHash(d: Decision): string {
 function normalizeBag(input: any): ProvenanceBag {
   const bag = input && typeof input === "object" ? input : {};
   const nodes = Array.isArray(bag.nodes) ? bag.nodes : [];
+  const edges = Array.isArray(bag.edges) ? bag.edges : [];
   return {
     nodes,
+    edges,
     last_node_id: typeof bag.last_node_id === "string" ? bag.last_node_id : null,
     last_node_hash: typeof bag.last_node_hash === "string" ? bag.last_node_hash : null,
     last_history_len: typeof bag.last_history_len === "number" ? bag.last_history_len : null,
   };
 }
+
+
 
 export function getProvenanceBag(decision: Decision): ProvenanceBag {
   const a: any = (decision as any)?.artifacts ?? {};
@@ -333,16 +346,23 @@ export function applyProvenanceTransition(input: {
     node_hash,
   };
 
- const nextBag: ProvenanceBag = {
+  const edges0 = Array.isArray((bag0 as any).edges) ? (bag0 as any).edges : [];
+  const nextEdges = [...edges0];
+
+  // ✅ Chain becomes a DAG with explicit edges (1 parent per node for now)
+  if (prev_node_id) {
+    nextEdges.push({ from: prev_node_id, to: node.node_id, kind: "CAUSES", meta: null });
+  }
+
+  const nextBag: ProvenanceBag = {
     nodes: [...nodes0, node],
+    edges: nextEdges,
     last_node_id: node.node_id,
     last_node_hash: node.node_hash,
     last_history_len: historyLen,
   };
 
-
   return setProvenanceBag(after, nextBag);
-
 }
 
 
