@@ -243,13 +243,13 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
   try {
     // ✅ verify receipts against canonical replay head (NOT persisted blob)
     // Raw decision (what engine reconstructed or loaded)
-    const decisionForReceiptCheckRaw = canonicalDecision ?? persistedDecision;
+    // We are verifying DB integrity, so hash the *persisted* decision blob.
+    // Canonical replay is only for diagnostics / comparison.
+    const persistedForCheckRaw = persistedDecision ?? canonicalDecision;
+    const canonicalForCheckRaw = canonicalDecision ?? persistedDecision;
 
-    // Canonical receipt view (removes volatile fields like updated_at, signatures, etc)
-    const decisionForReceiptCheck = stripNonStateFieldsForHash(decisionForReceiptCheckRaw);
-
-    // Canonical hash view (what BOTH writer + verifier must hash)
-    const decisionForHash = decisionForReceiptCheck;
+    const persistedForCheck = stripNonStateFieldsForHash(persistedForCheckRaw);
+    const canonicalForCheck = stripNonStateFieldsForHash(canonicalForCheckRaw);
 
     // 1) Detect decision_json tamper vs latest receipt hashes
     const lastReceipt = db
@@ -284,7 +284,7 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
       try {
         candidates.push({
           mode: "LEGACY_TAMPER_V_CURRENT",
-          hash: computeTamperStateHash(decisionForReceiptCheck as any),
+          hash: computeTamperStateHash(persistedForCheck as any),
         });
       } catch (e) {}
 
@@ -292,7 +292,7 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
       try {
         candidates.push({
           mode: "LEGACY_PUBLIC_V_CURRENT",
-          hash: computePublicStateHash(decisionForReceiptCheck as any),
+          hash: computePublicStateHash(persistedForCheck as any),
         });
       } catch (e) {}
 
@@ -325,7 +325,7 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
       }
     } else {
       // ✅ DUAL HASH path (public hash is authoritative)
-      const computedPublic = computePublicStateHash(decisionForReceiptCheck as any);
+      const computedPublic = computePublicStateHash(persistedForCheck as any);
 
       if (String(computedPublic) !== String(expectedPublic)) {
         return [
@@ -348,7 +348,7 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
 
       // Optional: also assert tamper hash matches, if present
       if (expectedTamper) {
-        const computedTamper = computeTamperStateHash(decisionForReceiptCheck as any);
+        const computedTamper = computeTamperStateHash(persistedForCheck as any);
         if (String(computedTamper) !== String(expectedTamper)) {
           return [
             {
