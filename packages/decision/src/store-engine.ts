@@ -1977,19 +1977,33 @@ export async function applyEventWithStore(
         if (gated.has(eventToAppend.type as any)) {
           const gateResult = await evaluateEventGate({
             decision_id: input.decision_id,
-            decision: headDecision,                 // ✅ correct variable in this scope
-            event: eventToAppend,                   // ✅ the actual event being appended
+            decision: headDecision,
+            event: eventToAppend,
             store,
-            internal_bypass_enterprise_gates: !!input.internal_bypass_enterprise_gates, // ✅ force boolean
+            internal_bypass_enterprise_gates: !!input.internal_bypass_enterprise_gates,
+
+            // Feature 20B: hooks (so we can later plug in real policy + state-machine cleanly)
+            hooks: {
+              // If you already have a state-machine helper, wire it here later.
+              // Leaving it out does NOT break anything today.
+              // isEventAllowedFromState: ({ state_before, event_type }) => ({ allowed: true }),
+
+              // If you already have policy evaluation in store-engine, wire it here later.
+              // evaluatePolicyForEvent: ({ decision_id, decision, event, store }) => ({ ok: true }),
+
+              // Optional override for required roles.
+              // getRequiredRolesForEvent: (t) => (["APPROVE","REJECT","PUBLISH"].includes(t) ? ["APPROVER","ADMIN"] : null),
+            },
           });
 
           if (!gateResult.ok) {
             return {
               ok: false,
-              decision: headDecision,               // ✅ return current decision on failure
+              decision: headDecision,
               violations: gateResult.violations,
               consequence_preview: gateResult.consequence_preview,
-            };
+              gate_report: (gateResult as any).gate_report, // ✅ add for explainability
+            } as any;
           }
         }
       }
