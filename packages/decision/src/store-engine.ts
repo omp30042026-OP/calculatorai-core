@@ -61,7 +61,7 @@ import type { HexHash } from "./snapshots.js";
 import { createDefaultPolicyEngine } from "./policy-engine.js";
 import { computeTrust, makeLiabilityReceipt } from "./trust-liability.js";
 import { ensureEnterpriseTables } from "./enterprise-schema.js";
-import { defaultWorkflowTemplates, computeWorkflowStatus } from "./workflow-engine.js";
+import { evaluateEventGate } from "./gates/evaluate-event-gate.js";
 
 
 import {
@@ -76,6 +76,8 @@ import { enforceTrustBoundary as enforceTrustBoundaryV2, type TrustBoundaryPolic
 
 import type { SignerDirectory } from "./signer-binding.js";
 import { verifySignerBindingAsync } from "./signer-binding.js";
+
+
 
 
 
@@ -1968,37 +1970,29 @@ export async function applyEventWithStore(
 
 
 
-      // ✅ Enterprise Workflow Gate
+      // ✅ Enterprise Workflow Gate (Feature 19 unified gate)
       if (!input.internal_bypass_enterprise_gates) {
-        const gate = new Set<DecisionEvent["type"]>(["APPROVE", "REJECT", "PUBLISH"] as any);
-        if (gate.has(eventToAppend.type as any)) {
-          const templates = defaultWorkflowTemplates();
-          const template = templates[0];
-          if (template) {
-            const status = computeWorkflowStatus({
-              template,
-              decision: headDecision,
-              pending_event_type: (eventToAppend as any)?.type ?? null,
-            });
-            if (!status.is_complete) {
-              return {
-                ok: false,
-                decision: headDecision,
-                violations: [
-                  {
-                    code: "WORKFLOW_INCOMPLETE",
-                    severity: "BLOCK",
-                    message: `Workflow not complete for ${eventToAppend.type}`,
-                    details: { workflow_id: template.workflow_id, status } as any,
-                  },
-                ],
-                consequence_preview,
-              };
-            }
+        const gated = new Set<DecisionEvent["type"]>(["APPROVE", "REJECT", "PUBLISH"] as any);
+
+        if (gated.has(eventToAppend.type as any)) {
+          const gateResult = await evaluateEventGate({
+            decision_id: input.decision_id,
+            decision: headDecision,                 // ✅ correct variable in this scope
+            event: eventToAppend,                   // ✅ the actual event being appended
+            store,
+            internal_bypass_enterprise_gates: !!input.internal_bypass_enterprise_gates, // ✅ force boolean
+          });
+
+          if (!gateResult.ok) {
+            return {
+              ok: false,
+              decision: headDecision,               // ✅ return current decision on failure
+              violations: gateResult.violations,
+              consequence_preview: gateResult.consequence_preview,
+            };
           }
         }
       }
-
       
       // ✅ Stamp into event so replay uses the same time later
       eventToAppend = {
