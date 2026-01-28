@@ -62,17 +62,30 @@ export function computeWorkflowStatus(params: {
       const key = String(step.value);
 
       const direct = decisionObj?.[key];
+
+      // ✅ IMPORTANT: receipt view includes meta + risk, not arbitrary top-level keys
+      const meta = decisionObj?.meta?.[key];
+      const risk = decisionObj?.risk?.[key];
+
       const fields = decisionObj?.fields?.[key];
-      const artifacts = decisionObj?.artifacts?.[key];            // ✅ ADD THIS
-      const artifactsFields = decisionObj?.artifacts?.fields?.[key]; // ✅ optional but safe
+
+      const artifacts = decisionObj?.artifacts?.[key];
+      const artifactsFields = decisionObj?.artifacts?.fields?.[key];
       const extra = decisionObj?.artifacts?.extra?.[key];
 
-      const anyVal = fields ?? artifactsFields ?? artifacts ?? direct ?? extra;
+      // ✅ add meta/risk into search path (and keep order stable)
+      const anyVal =
+        fields ??
+        meta ??
+        risk ??
+        artifactsFields ??
+        artifacts ??
+        direct ??
+        extra;
 
       if (anyVal == null) {
         ok = false;
       } else if (typeof anyVal === "object") {
-        // for shapes like { value: 2500, currency: "USD" }
         ok = (anyVal as any)?.value != null || Object.keys(anyVal as any).length > 0;
       } else {
         ok = true;

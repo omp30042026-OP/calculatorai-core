@@ -1,8 +1,9 @@
+// packages/decision/__tests__/_helpers/memory-store.ts
 import type { DecisionStore } from "../../src/store.js";
+import { SqliteDecisionStore } from "../../src/sqlite-store.js";
 
-// NOTE: This is a stub to satisfy TypeScript.
-// Either implement a real in-memory DecisionStore here,
-// or rewrite rbac.finalize.test.ts to use SqliteDecisionStore.
+// Use SQLite in-memory DB as our "memory store" for tests.
 export function createMemoryStore(): DecisionStore {
-  throw new Error("createMemoryStore not implemented");
+  return new SqliteDecisionStore(":memory:");
 }
+
