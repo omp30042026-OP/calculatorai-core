@@ -68,7 +68,8 @@ import {
   computeDecisionStateHash,
   stripNonStateFieldsForHash,
   computeTamperStateHash,
-  computePublicStateHash,
+  computePublicStateHash
+  
 } from "./state-hash.js";
 
 import { enforceTrustBoundary as enforceTrustBoundaryV2, type TrustBoundaryPolicy } from "./trust-boundary.js";
@@ -79,7 +80,15 @@ import { verifySignerBindingAsync } from "./signer-binding.js";
 
 
 
+import {
+  buildDiaV1,
+  computeDiaHashV1,
+  type DiaSigner,
+  type DiaStore,
+  type DiaFinalizeType,
+} from "./dia.js";
 
+import { makeSqliteDiaStore } from "./dia-store-sqlite.js";
 
 
 
@@ -115,6 +124,376 @@ function stableStringify(value: unknown): string {
 function sha256Hex(s: string): string {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
 }
+
+
+
+function computeForkEditsHashV1(edits: unknown): string {
+  return sha256Hex(
+    stableStringify({
+      kind: "FORK_EDITS_HASH_V1",
+      edits: edits ?? null,
+    })
+  );
+}
+
+function computeForkReceiptHashV1(params: {
+  source_decision_id: string;
+  branch_decision_id: string;
+  up_to_seq: number;
+  base_seq: number;
+  edits_hash: string;
+  source_public_state_hash: string | null;
+  branch_public_state_hash: string | null;
+  created_at: string;
+}): string {
+  return sha256Hex(
+    stableStringify({
+      kind: "FORK_RECEIPT_HASH_V1",
+      source_decision_id: params.source_decision_id,
+      branch_decision_id: params.branch_decision_id,
+      up_to_seq: params.up_to_seq,
+      base_seq: params.base_seq,
+      edits_hash: params.edits_hash,
+      source_public_state_hash: params.source_public_state_hash,
+      branch_public_state_hash: params.branch_public_state_hash,
+      created_at: params.created_at,
+    })
+  );
+}
+
+
+// ✅ Feature 16-D: Fork receipt verifier (portable + SQLite cross-check)
+// - Verifies branch root contains fork_receipt
+// - Recomputes receipt hash from canonical fields
+// - If SQLite is present, cross-checks fork_receipts table too
+export async function verifyForkReceiptWithStore(
+  store: DecisionStore,
+  input: {
+    branch_decision_id: string;
+    // Optional: if provided, we verify it matches what's stored
+    expected_source_decision_id?: string;
+    // If true, require SQLite row to exist (default false, because portable mode exists)
+    require_sqlite_row?: boolean;
+  },
+  opts: DecisionEngineOptions = {}
+): Promise<
+  | { ok: true; branch_decision_id: string; source_decision_id: string; receipt: any; sqlite?: any | null }
+  | { ok: false; branch_decision_id: string; violations: PolicyViolation[]; sqlite?: any | null }
+> {
+  const branchId = String(input.branch_decision_id);
+
+  const root = await store.getRootDecision(branchId);
+  if (!root) {
+    return {
+      ok: false,
+      branch_decision_id: branchId,
+      violations: [
+        {
+          code: "BRANCH_NOT_FOUND",
+          severity: "BLOCK",
+          message: "Branch root decision not found.",
+          details: { branch_decision_id: branchId } as any,
+        },
+      ],
+      sqlite: null,
+    };
+  }
+
+  const fr =
+    (root as any)?.artifacts?.extra?.fork_receipt ??
+    null;
+
+  if (!fr || typeof fr !== "object") {
+    return {
+      ok: false,
+      branch_decision_id: branchId,
+      violations: [
+        {
+          code: "FORK_RECEIPT_MISSING",
+          severity: "BLOCK",
+          message: "Branch root is missing artifacts.extra.fork_receipt.",
+          details: { branch_decision_id: branchId } as any,
+        },
+      ],
+      sqlite: null,
+    };
+  }
+
+  const sourceId = typeof fr.source_decision_id === "string" ? String(fr.source_decision_id) : "";
+  const storedBranchId = typeof fr.branch_decision_id === "string" ? String(fr.branch_decision_id) : "";
+  const up_to_seq = Number(fr.up_to_seq ?? NaN);
+  const base_seq = Number(fr.base_seq ?? NaN);
+  const edits_hash = typeof fr.edits_hash === "string" ? String(fr.edits_hash) : "";
+  const source_public_state_hash =
+    fr.source_public_state_hash == null ? null : String(fr.source_public_state_hash);
+  const branch_public_state_hash =
+    fr.branch_public_state_hash == null ? null : String(fr.branch_public_state_hash);
+  const created_at = typeof fr.created_at === "string" ? String(fr.created_at) : "";
+  const storedReceiptHash = typeof fr.receipt_hash === "string" ? String(fr.receipt_hash) : "";
+
+  const violations: PolicyViolation[] = [];
+
+  if (!sourceId) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.source_decision_id is missing/invalid.",
+      details: { branch_decision_id: branchId } as any,
+    });
+  }
+
+  if (!storedBranchId || storedBranchId !== branchId) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.branch_decision_id mismatch.",
+      details: { branch_decision_id: branchId, stored_branch_decision_id: storedBranchId } as any,
+    });
+  }
+
+  if (!Number.isFinite(up_to_seq) || up_to_seq < 0) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.up_to_seq is missing/invalid.",
+      details: { branch_decision_id: branchId, up_to_seq } as any,
+    });
+  }
+
+  if (!Number.isFinite(base_seq) || base_seq < 0) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.base_seq is missing/invalid.",
+      details: { branch_decision_id: branchId, base_seq } as any,
+    });
+  }
+
+  if (!edits_hash) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.edits_hash is missing/invalid.",
+      details: { branch_decision_id: branchId } as any,
+    });
+  }
+
+  if (!created_at) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.created_at is missing/invalid.",
+      details: { branch_decision_id: branchId } as any,
+    });
+  }
+
+  if (!storedReceiptHash) {
+    violations.push({
+      code: "FORK_RECEIPT_INVALID",
+      severity: "BLOCK",
+      message: "fork_receipt.receipt_hash is missing/invalid.",
+      details: { branch_decision_id: branchId } as any,
+    });
+  }
+
+  if (input.expected_source_decision_id && sourceId && String(input.expected_source_decision_id) !== sourceId) {
+    violations.push({
+      code: "FORK_RECEIPT_SOURCE_MISMATCH",
+      severity: "BLOCK",
+      message: "Fork receipt source_decision_id does not match expected.",
+      details: {
+        branch_decision_id: branchId,
+        expected_source_decision_id: String(input.expected_source_decision_id),
+        stored_source_decision_id: sourceId,
+      } as any,
+    });
+  }
+
+  // If basic shape is broken, stop early (avoid recompute nonsense)
+  if (violations.length) {
+    return { ok: false, branch_decision_id: branchId, violations, sqlite: null };
+  }
+
+  // ✅ Recompute receipt hash from canonical fields
+  const computed = computeForkReceiptHashV1({
+    source_decision_id: sourceId,
+    branch_decision_id: branchId,
+    up_to_seq: Math.floor(up_to_seq),
+    base_seq: Math.floor(base_seq),
+    edits_hash,
+    source_public_state_hash,
+    branch_public_state_hash,
+    created_at,
+  });
+
+  if (String(computed) !== String(storedReceiptHash)) {
+    return {
+      ok: false,
+      branch_decision_id: branchId,
+      violations: [
+        {
+          code: "FORK_RECEIPT_HASH_MISMATCH",
+          severity: "BLOCK",
+          message: "Fork receipt hash mismatch (artifacts fork_receipt is tampered or nondeterministic).",
+          details: {
+            branch_decision_id: branchId,
+            source_decision_id: sourceId,
+            stored: String(storedReceiptHash),
+            computed: String(computed),
+          } as any,
+        },
+      ],
+      sqlite: null,
+    };
+  }
+
+  // ✅ SQLite cross-check (if available)
+  const db = (store as any)?.db;
+  if (db) {
+    try {
+      ensureEnterpriseTables(db);
+
+      const row = db.prepare(
+        `SELECT
+          branch_decision_id,
+          source_decision_id,
+          up_to_seq,
+          base_seq,
+          edits_hash,
+          source_public_state_hash,
+          branch_public_state_hash,
+          receipt_hash,
+          created_at
+        FROM fork_receipts
+        WHERE branch_decision_id=?
+        LIMIT 1`
+      ).get(branchId) as any;
+
+      if (!row) {
+        if (input.require_sqlite_row === true) {
+          return {
+            ok: false,
+            branch_decision_id: branchId,
+            violations: [
+              {
+                code: "FORK_RECEIPT_ROW_MISSING",
+                severity: "BLOCK",
+                message: "Fork receipt SQLite row missing for branch_decision_id.",
+                details: { branch_decision_id: branchId } as any,
+              },
+            ],
+            sqlite: null,
+          };
+        }
+        // portable mode is still OK
+        return {
+          ok: true,
+          branch_decision_id: branchId,
+          source_decision_id: sourceId,
+          receipt: fr,
+          sqlite: null,
+        };
+      }
+
+      // Strict match: if row exists, it must match artifacts and computed hash
+      const rowHash = row?.receipt_hash ? String(row.receipt_hash) : "";
+      if (rowHash && rowHash !== String(computed)) {
+        return {
+          ok: false,
+          branch_decision_id: branchId,
+          violations: [
+            {
+              code: "FORK_RECEIPT_TAMPERED",
+              severity: "BLOCK",
+              message: "fork_receipts.receipt_hash does not match artifacts fork_receipt hash.",
+              details: {
+                branch_decision_id: branchId,
+                stored_row: rowHash,
+                computed_from_artifacts: String(computed),
+              } as any,
+            },
+          ],
+          sqlite: row,
+        };
+      }
+
+      // Optional: verify canonical columns too (helps detect partial tamper)
+      const same =
+        String(row.source_decision_id ?? "") === String(sourceId) &&
+        Number(row.up_to_seq ?? -1) === Math.floor(up_to_seq) &&
+        Number(row.base_seq ?? -1) === Math.floor(base_seq) &&
+        String(row.edits_hash ?? "") === String(edits_hash) &&
+        String(row.created_at ?? "") === String(created_at);
+
+      if (!same) {
+        return {
+          ok: false,
+          branch_decision_id: branchId,
+          violations: [
+            {
+              code: "FORK_RECEIPT_ROW_MISMATCH",
+              severity: "BLOCK",
+              message: "fork_receipts row does not match artifacts fork_receipt fields.",
+              details: {
+                branch_decision_id: branchId,
+                artifacts: {
+                  source_decision_id: sourceId,
+                  up_to_seq: Math.floor(up_to_seq),
+                  base_seq: Math.floor(base_seq),
+                  edits_hash,
+                  created_at,
+                },
+                row: {
+                  source_decision_id: String(row.source_decision_id ?? ""),
+                  up_to_seq: Number(row.up_to_seq ?? null),
+                  base_seq: Number(row.base_seq ?? null),
+                  edits_hash: String(row.edits_hash ?? ""),
+                  created_at: String(row.created_at ?? ""),
+                },
+              } as any,
+            },
+          ],
+          sqlite: row,
+        };
+      }
+
+      return {
+        ok: true,
+        branch_decision_id: branchId,
+        source_decision_id: sourceId,
+        receipt: fr,
+        sqlite: row,
+      };
+    } catch (e) {
+      return {
+        ok: false,
+        branch_decision_id: branchId,
+        violations: [
+          {
+            code: "FORK_RECEIPT_VERIFY_FAILED",
+            severity: "BLOCK",
+            message: "Fork receipt verification failed (unable to verify safely).",
+            details: { branch_decision_id: branchId, error: String((e as any)?.message ?? e) } as any,
+          },
+        ],
+        sqlite: null,
+      };
+    }
+  }
+
+  // No DB: portable verification already succeeded
+  return {
+    ok: true,
+    branch_decision_id: branchId,
+    source_decision_id: sourceId,
+    receipt: fr,
+    sqlite: null,
+  };
+}
+
+
+
+
 
 function computeReceiptHashV1(params: {
   decision_id: string;
@@ -625,6 +1004,52 @@ async function verifyLoadedSnapshotOrThrow(
     }
   }
 
+
+ 
+
+
+  // 5) ✅ root_hash must match merkle root of event hashes up to snapshot seq (if we can check)
+  const storedRoot =
+    typeof snapshot.root_hash === "string" ? snapshot.root_hash : null;
+
+  if (storedRoot && snapSeq > 0) {
+    try {
+      const hashes = await loadEventHashesUpToSeqBestEffort(store, decision_id, snapSeq);
+
+      // Only verify if we actually have ALL hashes (no pruning/missing)
+      const complete =
+        hashes.length === snapSeq &&
+        hashes.every((h) => typeof h === "string" && h && String(h).length > 0);
+
+      if (complete) {
+        const computedRoot = computeMerkleRootFromEventHashes(hashes as any);
+
+        if (computedRoot && String(computedRoot) !== String(storedRoot)) {
+          return [
+            {
+              code: "SNAPSHOT_ROOT_HASH_MISMATCH",
+              severity: "BLOCK",
+              message:
+                "Snapshot root_hash does not match merkle root of event hashes (possible tamper).",
+              details: {
+                decision_id,
+                up_to_seq: snapSeq,
+                stored_root_hash: String(storedRoot),
+                computed_root_hash: String(computedRoot),
+              } as any,
+            },
+          ];
+        }
+      }
+    } catch (e) {
+      // Best-effort: if we can't verify, don't block here.
+      // Integrity is still guarded by provenance + state_hash checks above.
+    }
+  }
+
+
+
+
   return [];
 }
 
@@ -838,6 +1263,116 @@ async function emitLedger(
     });
   }
 }
+
+
+
+async function emitDiaPostHoc(params: {
+  store: DecisionStore;
+  input: {
+    diaStore?: DiaStore;
+    diaSigner?: DiaSigner;
+    require_dia_on_finalize?: boolean;
+  };
+  db: any;
+  nowIso: string;
+
+  decision_id: string;
+  decision_created_at: string;
+
+  event_seq: number;
+  finalize_event_type: DiaFinalizeType;
+  event_at: string;
+
+  actor_id: string | null;
+  actor_type: string | null;
+  roles?: string[] | null;
+
+  public_state_hash: string | null;
+  tamper_state_hash: string | null;
+  liability_receipt_hash: string | null;
+  obligations_hash: string | null;
+
+  parent_decision_id: string | null;
+  fork_receipt_hash: string | null;
+}): Promise<void> {
+  const {
+    store, input, db, nowIso,
+    decision_id, decision_created_at,
+    event_seq, finalize_event_type, event_at,
+    actor_id, actor_type, roles,
+    public_state_hash, tamper_state_hash,
+    liability_receipt_hash, obligations_hash,
+    parent_decision_id, fork_receipt_hash,
+  } = params;
+
+  const dia = buildDiaV1({
+    decision_id,
+    event_seq,
+    finalize_event_type,
+    made_at: decision_created_at,
+    finalized_at: event_at,
+    actor_id,
+    actor_type,
+    roles: roles ?? null,
+    public_state_hash,
+    tamper_state_hash,
+    liability_receipt_hash,
+    obligations_hash,
+    parent_decision_id,
+    fork_receipt_hash,
+    notes: null,
+  });
+
+  const dia_hash = computeDiaHashV1(dia);
+
+  let sig: any | null = null;
+  if (input.diaSigner) {
+    sig = await input.diaSigner.signDia({ dia_hash, dia, now: nowIso });
+  }
+
+  // choose store: prefer input.diaStore, else sqlite store if db exists, else store.appendDia if present
+  const diaStore =
+    input.diaStore ??
+    (db ? makeSqliteDiaStore(db) : null);
+
+  // back-compat: allow wiring on DecisionStore
+  const anyStore = store as any;
+
+  if (diaStore) {
+    await diaStore.appendDia({
+      decision_id,
+      event_seq,
+      dia_kind: "DIA_V1",
+      dia_hash,
+      dia_json: dia,
+      signature_json: sig,
+      created_at: nowIso,
+    });
+    return;
+  }
+
+  if (typeof anyStore.appendDia === "function") {
+    await anyStore.appendDia({
+      decision_id,
+      event_seq,
+      dia_kind: "DIA_V1",
+      dia_hash,
+      dia_json: dia,
+      signature_json: sig,
+      created_at: nowIso,
+    });
+    return;
+  }
+
+  // nowhere to store: allowed unless require=true
+  if (input.require_dia_on_finalize === true) {
+    throw new Error("DIA_REQUIRED_BUT_NO_STORE_CONFIGURED");
+  }
+}
+
+
+
+
 
 
 // =====================================
@@ -1103,6 +1638,51 @@ export async function persistCounterfactualBranchWithStore(
   // 2) create branch root
   const existingBranch = await store.getRootDecision(branchId);
   if (existingBranch) {
+
+    const db = (store as any)?.db;
+    if (db) {
+      try {
+        ensureEnterpriseTables(db);
+
+        const fr = db.prepare(
+          `SELECT receipt_hash FROM fork_receipts WHERE branch_decision_id=? LIMIT 1`
+        ).get(branchId) as any;
+
+        const stored = fr?.receipt_hash ? String(fr.receipt_hash) : "";
+
+        // Compare against branch root artifacts if present (portable truth)
+        const expected =
+          (existingBranch as any)?.artifacts?.extra?.fork_receipt?.receipt_hash
+            ? String((existingBranch as any).artifacts.extra.fork_receipt.receipt_hash)
+            : "";
+
+        // If we have both, mismatch = tamper
+        if (stored && expected && stored !== expected) {
+          return {
+            ok: false,
+            source_decision_id: sourceId,
+            branch_decision_id: branchId,
+            applied_events: 0,
+            baseline: { up_to_seq: plan.upto, base_seq: plan.baseSeq, latest_seq: plan.latestSeq, decision: baselineDecision },
+            counterfactual: { up_to_seq: plan.upto, decision: cfDecision },
+            violations: [
+              {
+                code: "FORK_RECEIPT_TAMPERED",
+                severity: "BLOCK",
+                message: "Fork receipt tampered: fork_receipts.receipt_hash does not match branch artifacts fork_receipt.receipt_hash.",
+                details: { branch_decision_id: branchId, stored, expected } as any,
+              },
+            ],
+            used: plan.used,
+          } as any;
+        }
+      } catch (e) {
+        // strict is fine here too if you want:
+        // throw e;
+      }
+    }
+
+
     return {
       ok: false,
       source_decision_id: sourceId,
@@ -1119,12 +1699,21 @@ export async function persistCounterfactualBranchWithStore(
       ],
       used: plan.used,
     };
+
+     
+
+
+
+
   }
+
+
+
 
   const sourceRoot = await store.getRootDecision(sourceId);
   const createdAt = nowIso(opts);
 
-  const branchRoot = createDecisionV2(
+    const branchRoot = createDecisionV2(
     {
       decision_id: branchId,
       parent_decision_id: sourceId,
@@ -1142,8 +1731,161 @@ export async function persistCounterfactualBranchWithStore(
     () => createdAt
   ) as any;
 
+  // ✅ Fork receipt (deterministic, tamper-evident)
+  const edits_hash = computeForkEditsHashV1(input.edits);
+
+  const source_public_state_hash = (() => {
+    try {
+      return computePublicStateHash(stripNonStateFieldsForHash(baselineDecision as any));
+    } catch {
+      return null;
+    }
+  })();
+
+  // We don't have the branch state yet (events not applied), but we *do* have an in-memory counterfactual head.
+  const branch_public_state_hash = (() => {
+    try {
+      return computePublicStateHash(stripNonStateFieldsForHash(cfDecision as any));
+    } catch {
+      return null;
+    }
+  })();
+
+  const fork_receipt_hash = computeForkReceiptHashV1({
+    source_decision_id: sourceId,
+    branch_decision_id: branchId,
+    up_to_seq: plan.upto,
+    base_seq: plan.baseSeq,
+    edits_hash,
+    source_public_state_hash,
+    branch_public_state_hash,
+    created_at: createdAt,
+  });
+
+  // Stamp receipt into branch root artifacts (works even without SQLite)
+  branchRoot.artifacts = {
+    ...(branchRoot.artifacts ?? {}),
+    extra: {
+      ...((branchRoot.artifacts?.extra ?? {}) as any),
+      fork_receipt: {
+        kind: "FORK_RECEIPT_V1",
+        source_decision_id: sourceId,
+        branch_decision_id: branchId,
+        up_to_seq: plan.upto,
+        base_seq: plan.baseSeq,
+        edits_hash,
+        source_public_state_hash,
+        branch_public_state_hash,
+        receipt_hash: fork_receipt_hash,
+        created_at: createdAt,
+      },
+    },
+  };
+
+  // Create + persist branch root
   await store.createDecision(branchRoot as any);
   await store.putDecision(branchRoot as any);
+
+  // If SQLite is present, store the fork receipt row (idempotent + tamper detect)
+  const db = (store as any)?.db;
+    if (db) {
+      ensureEnterpriseTables(db);
+
+      // ✅ Use the already-stamped portable fork_receipt from branch root as the source of truth
+      const fr = (branchRoot as any)?.artifacts?.extra?.fork_receipt ?? null;
+      if (!fr || typeof fr !== "object") {
+        throw new Error("FORK_RECEIPT_MISSING_ON_BRANCH_ROOT");
+      }
+
+      const fr_edits_hash = String(fr.edits_hash ?? "");
+      const fr_source_public_state_hash =
+        fr.source_public_state_hash == null ? null : String(fr.source_public_state_hash);
+      const fr_branch_public_state_hash =
+        fr.branch_public_state_hash == null ? null : String(fr.branch_public_state_hash);
+
+      const fr_fork_receipt_hash = String(fr.receipt_hash ?? "");
+
+      if (!fr_edits_hash || !fr_fork_receipt_hash) {
+        throw new Error("FORK_RECEIPT_INVALID_ON_BRANCH_ROOT");
+      }
+
+      // ✅ Recompute and verify determinism (if this fails, something is nondeterministic/tampered)
+      const recomputed = computeForkReceiptHashV1({
+        source_decision_id: String(fr.source_decision_id ?? ""),
+        branch_decision_id: String(fr.branch_decision_id ?? ""),
+        up_to_seq: Math.floor(Number(fr.up_to_seq ?? NaN)),
+        base_seq: Math.floor(Number(fr.base_seq ?? NaN)),
+        edits_hash: fr_edits_hash,
+        source_public_state_hash: fr_source_public_state_hash,
+        branch_public_state_hash: fr_branch_public_state_hash,
+        created_at: String(fr.created_at ?? ""),
+      });
+
+      if (recomputed !== fr_fork_receipt_hash) {
+        throw new Error(
+          `FORK_RECEIPT_HASH_MISMATCH: stored=${fr_fork_receipt_hash} recomputed=${recomputed}`
+        );
+      }
+
+      // ✅ Idempotent insert + strict verification
+      const existing = db
+        .prepare(
+          `SELECT receipt_hash, edits_hash, source_public_state_hash, branch_public_state_hash, up_to_seq, base_seq, source_decision_id
+          FROM fork_receipts
+          WHERE branch_decision_id=?
+          LIMIT 1`
+        )
+        .get(branchId) as any;
+
+      if (!existing) {
+        db.prepare(`
+          INSERT OR IGNORE INTO fork_receipts(
+            branch_decision_id,
+            source_decision_id,
+            up_to_seq,
+            base_seq,
+            edits_hash,
+            source_public_state_hash,
+            branch_public_state_hash,
+            receipt_hash,
+            created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          branchId,
+          sourceId,
+          plan.upto,
+          plan.baseSeq,
+          fr_edits_hash,
+          fr_source_public_state_hash,
+          fr_branch_public_state_hash,
+          fr_fork_receipt_hash,
+          createdAt
+        );
+
+        // If insert was ignored, re-read and verify
+        const post = db
+          .prepare(
+            `SELECT receipt_hash
+            FROM fork_receipts
+            WHERE branch_decision_id=?
+            LIMIT 1`
+          )
+          .get(branchId) as any;
+
+        if (post?.receipt_hash && String(post.receipt_hash) !== String(fr_fork_receipt_hash)) {
+          throw new Error(
+            `FORK_RECEIPT_CONFLICT: stored=${String(post.receipt_hash)} computed=${String(fr_fork_receipt_hash)}`
+          );
+        }
+      } else {
+        const stored = String(existing.receipt_hash ?? "");
+        if (stored && stored !== String(fr_fork_receipt_hash)) {
+          throw new Error(
+            `FORK_RECEIPT_TAMPERED: stored=${stored} computed=${String(fr_fork_receipt_hash)}`
+          );
+        }
+      }
+    }
 
   // 3) materialize by applying planned counterfactual event list onto the new branch decision
   let applied = 0;
@@ -1383,6 +2125,12 @@ export async function applyEventWithStore(
     };
 
 
+    // ✅ Feature 27: DIA (Decision Integrity Attestation) - strictly post-hoc
+    diaStore?: DiaStore;     // optional external store
+    diaSigner?: DiaSigner;   // optional signer
+    emit_dia_on_finalize?: boolean;     // default true
+    require_dia_on_finalize?: boolean;  // default false (AWS-friendly)
+
 
   },
   opts: DecisionEngineOptions = {}
@@ -1394,6 +2142,9 @@ export async function applyEventWithStore(
     
 
   return run(async () => {
+
+  // ✅ Keep the last computed receipt hash in-scope for DIA emission (no globalThis)
+  let last_liability_receipt_hash: string | null = null;
 
     // ✅ Enterprise tables (safe to call repeatedly)
     const db = (store as any).db;
@@ -1802,49 +2553,7 @@ export async function applyEventWithStore(
 
 
 
-    // ✅ Enterprise Policy Engine (RBAC)
-    if (!input.internal_bypass_enterprise_gates) {
-      const policy = createDefaultPolicyEngine();
-      const now = nowIso(opts);
-
-      let roles: string[] = [];
-      try {
-        if (db) {
-          const rows = db
-            .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
-            .all(input.decision_id, (input.event as any)?.actor_id);
-          roles = rows.map((r: any) => String(r.role));
-        }
-      } catch (e) {}
-
-      const auth = policy.authorize({
-        decision_id: input.decision_id,
-        decision: headDecision,
-        actor: {
-          actor_id: (input.event as any)?.actor_id,
-          actor_type: (input.event as any)?.actor_type,
-          roles,
-        },
-        event: input.event,
-        now,
-      });
-
-      if (!auth.ok) {
-        return {
-          ok: false,
-          decision: headDecision,
-          violations: [
-            {
-              code: auth.code,
-              severity: "BLOCK",
-              message: auth.message,
-              details: auth.details as any,
-            },
-          ],
-          consequence_preview,
-        };
-      }
-    }
+    
 
 
     // ✅ Feature 8: enrich ATTEST_EXTERNAL event with payload+receipt
@@ -1975,6 +2684,7 @@ export async function applyEventWithStore(
         const gated = new Set<DecisionEvent["type"]>(["APPROVE", "REJECT", "PUBLISH"] as any);
 
         if (gated.has(eventToAppend.type as any)) {
+          const enterprisePolicy = createDefaultPolicyEngine();
           const gateResult = await evaluateEventGate({
             decision_id: input.decision_id,
             decision: headDecision,
@@ -1982,17 +2692,41 @@ export async function applyEventWithStore(
             store,
             internal_bypass_enterprise_gates: !!input.internal_bypass_enterprise_gates,
 
-            // Feature 20B: hooks (so we can later plug in real policy + state-machine cleanly)
+            // ✅ Feature 21: Policy gate wiring
             hooks: {
-              // If you already have a state-machine helper, wire it here later.
-              // Leaving it out does NOT break anything today.
-              // isEventAllowedFromState: ({ state_before, event_type }) => ({ allowed: true }),
+              evaluatePolicyForEvent: ({ decision_id, decision, event, store }) => {
+                // Pull roles from DB (same logic you already used earlier)
+                let roles: string[] = [];
+                try {
+                  const db = (store as any)?.db;
+                  if (db) {
+                    const rows = db
+                      .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
+                      .all(decision_id, (event as any)?.actor_id);
+                    roles = rows.map((r: any) => String(r.role));
+                  }
+                } catch (e) {}
 
-              // If you already have policy evaluation in store-engine, wire it here later.
-              // evaluatePolicyForEvent: ({ decision_id, decision, event, store }) => ({ ok: true }),
+                const auth = enterprisePolicy.authorize({
+                  decision_id,
+                  decision,
+                  actor: {
+                    actor_id: (event as any)?.actor_id,
+                    actor_type: (event as any)?.actor_type,
+                    roles,
+                  },
+                  event,
+                  now: nowIso(opts),
+                });
 
-              // Optional override for required roles.
-              // getRequiredRolesForEvent: (t) => (["APPROVE","REJECT","PUBLISH"].includes(t) ? ["APPROVER","ADMIN"] : null),
+                return {
+                  ok: !!auth.ok,
+                  violations: auth.ok ? [] : [{ code: auth.code }],
+                  raw: auth.ok
+                    ? null
+                    : { code: auth.code, message: auth.message, details: auth.details ?? null },
+                };
+              },
             },
           });
 
@@ -2135,9 +2869,9 @@ export async function applyEventWithStore(
           } as any)
         : (withProv as any);
 
-      const toPersist = bindDecisionId(withPLS, input.decision_id);
-      // ✅ persist once (canonical head for everything downstream)
-      await store.putDecision(toPersist);
+     const toPersist = bindDecisionId(withPLS, input.decision_id);
+      // ✅ DO NOT persist here — we persist once at the end, after receipts/ledger/snapshots.
+      // This prevents double-write and keeps downstream steps referencing a single canonical persist point.
 
 
     // ✅ Feature 15 (Option B): persist PLS shield row (auditable)
@@ -2315,6 +3049,7 @@ export async function applyEventWithStore(
           obligations_hash,
           created_at: receipt.created_at,
         });
+        last_liability_receipt_hash = receipt_hash;
 
 
         if (process.env.DEBUG_LIABILITY) {
@@ -2340,36 +3075,117 @@ export async function applyEventWithStore(
 
 
 
-        // ✅ UPDATED INSERT (adds public_state_* columns)
-        db.prepare(`
-          INSERT INTO liability_receipts(
-            decision_id, event_seq,
-            receipt_id, kind, receipt_hash,
-            event_type, actor_id, actor_type,
-            trust_score, trust_reason,
-            state_before_hash, state_after_hash,
-            public_state_before_hash, public_state_after_hash,
+        // ✅ Idempotent receipt write (prevents UNIQUE constraint on retries)
+        const existingReceipt = db.prepare(
+          `SELECT receipt_hash
+          FROM liability_receipts
+          WHERE decision_id=? AND event_seq=?
+          LIMIT 1`
+        ).get(input.decision_id, appended.seq) as any;
+
+        if (!existingReceipt) {
+          // ✅ Idempotent insert: do not crash on reruns / nested calls.
+          // If the row already exists, verify it matches what we just computed (tamper-safe).
+          const ins = db.prepare(`
+            INSERT OR IGNORE INTO liability_receipts(
+              decision_id, event_seq,
+              receipt_id, kind, receipt_hash,
+              event_type, actor_id, actor_type,
+              trust_score, trust_reason,
+              state_before_hash, state_after_hash,
+              public_state_before_hash, public_state_after_hash,
+              obligations_hash,
+              created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          `);
+
+          const info = ins.run(
+            receipt.decision_id,
+            receipt.event_seq,
+            receipt.receipt_id,
+            "VERITASCALE_LIABILITY_RECEIPT_V1",
+            receipt_hash,
+            receipt.event_type,
+            receipt.actor_id,
+            receipt.actor_type,
+            receipt.trust_score,
+            receipt.trust_reason,
+            receipt.state_before_hash,
+            receipt.state_after_hash,
+            publicBeforeHash,
+            publicAfterHash,
             obligations_hash,
-            created_at
-          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        `).run(
-          receipt.decision_id,
-          receipt.event_seq,
-          receipt.receipt_id,
-          "VERITASCALE_LIABILITY_RECEIPT_V1",
-          receipt_hash,
-          receipt.event_type,
-          receipt.actor_id,
-          receipt.actor_type,
-          receipt.trust_score,
-          receipt.trust_reason,
-          receipt.state_before_hash,
-          receipt.state_after_hash,
-          publicBeforeHash,
-          publicAfterHash,
-          obligations_hash,
-          receipt.created_at
-        );
+            receipt.created_at
+          );
+
+          // If ignored, verify existing row matches what we expected.
+          // (If it doesn't, that's either nondeterminism or DB tamper.)
+          if (info.changes === 0) {
+            const existing = db.prepare(`
+              SELECT receipt_hash, state_after_hash, public_state_after_hash
+              FROM liability_receipts
+              WHERE decision_id=? AND event_seq=?
+              LIMIT 1
+            `).get(receipt.decision_id, receipt.event_seq) as any;
+
+            if (existing) {
+              const same =
+                String(existing.receipt_hash ?? "") === String(receipt_hash) &&
+                String(existing.state_after_hash ?? "") === String(receipt.state_after_hash ?? "") &&
+                String(existing.public_state_after_hash ?? "") === String(publicAfterHash ?? "");
+
+              if (!same) {
+                return {
+                  ok: false,
+                  decision: headDecision,
+                  violations: [
+                    {
+                      code: "LIABILITY_RECEIPT_CONFLICT",
+                      severity: "BLOCK",
+                      message:
+                        "Existing liability_receipts row conflicts with newly computed receipt (possible nondeterminism or tamper).",
+                      details: {
+                        decision_id: receipt.decision_id,
+                        event_seq: receipt.event_seq,
+                        existing,
+                        computed: {
+                          receipt_hash,
+                          state_after_hash: receipt.state_after_hash ?? null,
+                          public_state_after_hash: publicAfterHash ?? null,
+                        },
+                      } as any,
+                    },
+                  ],
+                  consequence_preview,
+                };
+              }
+            }
+          }
+        } else {
+          // If row exists, it MUST match — otherwise it's tamper / nondeterminism.
+          const stored = String(existingReceipt.receipt_hash ?? "");
+          if (stored && stored !== receipt_hash) {
+            return {
+              ok: false,
+              decision: headDecision,
+              violations: [
+                {
+                  code: "LIABILITY_RECEIPT_TAMPERED",
+                  severity: "BLOCK",
+                  message:
+                    "Existing liability receipt hash mismatch for decision_id+event_seq (possible tamper or nondeterministic receipt).",
+                  details: {
+                    decision_id: input.decision_id,
+                    event_seq: appended.seq,
+                    stored_receipt_hash: stored,
+                    computed_receipt_hash: receipt_hash,
+                  } as any,
+                },
+              ],
+              consequence_preview,
+            };
+          }
+        }
 
 
         // ✅ Feature 15 (Option B): persist PLS shield row (auditable) WITH receipt_hash linkage
@@ -2635,6 +3451,129 @@ export async function applyEventWithStore(
     
 
     await store.putDecision(toPersist);
+
+
+    // ✅ Feature 27: DIA (strictly post-hoc)
+    const EMIT_DIA = input.emit_dia_on_finalize !== false;
+    const FINALIZE = new Set(["APPROVE", "REJECT", "PUBLISH"]);
+
+    if (EMIT_DIA && FINALIZE.has(String(eventToAppend.type))) {
+      // Best-effort by default (AWS-friendly)
+      try {
+        // roles (optional) - reuse DB if present
+        let roles: string[] | null = null;
+        try {
+          const actorId = String((eventToAppend as any)?.actor_id ?? "");
+          if (actorId) {
+            if (typeof store.listRoles === "function") {
+              roles = (await store.listRoles(input.decision_id, actorId)) ?? [];
+            } else if (db) {
+              const rows = db
+                .prepare("SELECT role FROM decision_roles WHERE decision_id=? AND actor_id=?")
+                .all(input.decision_id, actorId);
+              roles = rows.map((r: any) => String(r.role));
+            }
+          }
+        } catch (e) {}
+
+        const parent_decision_id =
+          (toPersist as any)?.parent_decision_id != null
+            ? String((toPersist as any).parent_decision_id)
+            : ((toPersist as any)?.meta?.counterfactual_of ? String((toPersist as any).meta.counterfactual_of) : null);
+
+        const fork_receipt_hash =
+          (toPersist as any)?.artifacts?.extra?.fork_receipt?.receipt_hash
+            ? String((toPersist as any).artifacts.extra.fork_receipt.receipt_hash)
+            : null;
+
+        // You computed these in your liability section; re-derive if not in scope
+        const tamper_after_hash = computeTamperStateHash(stripNonStateFieldsForHash(toPersist));
+        const public_after_hash = computePublicStateHash(stripNonStateFieldsForHash(toPersist));
+
+        // We *want* the liability receipt hash, but if not available in scope, set null.
+        // If you have receipt_hash variable in scope, pass it here.
+        const receiptHashMaybe = last_liability_receipt_hash;
+
+        // obligations hash best-effort
+        const execution = (toPersist as any)?.artifacts?.execution ?? null;
+        const obligations = Array.isArray(execution?.obligations) ? execution.obligations : [];
+        const violations  = Array.isArray(execution?.violations)  ? execution.violations  : [];
+        const obligations_hash = crypto
+          .createHash("sha256")
+          .update(
+            JSON.stringify(
+              (function norm(v: any): any {
+                if (v === null) return null;
+                if (typeof v !== "object") return v;
+                if (Array.isArray(v)) return v.map(norm);
+                const out: any = {};
+                for (const k of Object.keys(v).sort()) {
+                  const vv = v[k];
+                  if (typeof vv === "undefined") continue;
+                  out[k] = norm(vv);
+                }
+                return out;
+              })({ obligations, violations })
+            ),
+            "utf8"
+          )
+          .digest("hex");
+
+        await emitDiaPostHoc({
+          store,
+          input: {
+            diaStore: input.diaStore,
+            diaSigner: input.diaSigner,
+            require_dia_on_finalize: input.require_dia_on_finalize === true,
+          },
+          db,
+          nowIso: nowIso(opts),
+
+          decision_id: input.decision_id,
+          decision_created_at: String((toPersist as any)?.created_at ?? nowIso(opts)),
+
+          event_seq: appended.seq,
+          finalize_event_type: String(eventToAppend.type) as any,
+          event_at: String(eventAt),
+
+          actor_id: (eventToAppend as any)?.actor_id ? String((eventToAppend as any).actor_id) : null,
+          actor_type: (eventToAppend as any)?.actor_type ? String((eventToAppend as any).actor_type) : null,
+          roles,
+
+          public_state_hash: public_after_hash,
+          tamper_state_hash: tamper_after_hash,
+          liability_receipt_hash: receiptHashMaybe,
+          obligations_hash,
+
+          parent_decision_id,
+          fork_receipt_hash,
+        });
+      } catch (e) {
+        if (input.require_dia_on_finalize === true) {
+          return {
+            ok: false,
+            decision: toPersist,
+            violations: [
+              {
+                code: "DIA_EMIT_FAILED",
+                severity: "BLOCK",
+                message: "DIA required but emission failed.",
+                details: { error: String((e as any)?.message ?? e) } as any,
+              },
+            ],
+            consequence_preview,
+          };
+        }
+        // best-effort: swallow
+        if (process.env.DEBUG_LIABILITY) {
+          console.error("❌ DIA emit failed (best-effort)", e);
+        }
+      }
+    }
+
+
+
+
 
     // snapshots + anchors unchanged (but ledger emission upgraded)
     if (input.snapshotStore && input.snapshotPolicy) {
