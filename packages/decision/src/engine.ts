@@ -749,8 +749,6 @@ export function applyDecisionEvent(
     "AGENT_TRIGGER_OBLIGATION",
 
     // ✅ Diagnostics / replay-only: do NOT change decision.state
-    "VALIDATE",
-    "SIMULATE",
     "EXPLAIN",
 
 
@@ -801,7 +799,14 @@ export function applyDecisionEvent(
 
   const nextBase: Decision = {
     ...decision,
-    state: t === "REJECT" ? "REJECTED" : nextState,
+    state:
+      t === "REJECT"
+        ? "REJECTED"
+        : t === "VALIDATE"
+          ? "VALIDATED"
+          : t === "SIMULATE"
+            ? "SIMULATED"
+            : nextState,
     updated_at: now(),
     artifacts:
       t === "ATTACH_ARTIFACTS"

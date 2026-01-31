@@ -50,7 +50,6 @@ export type DecisionSnapshot = {
    */
   root_hash?: HexHash | null;
 
-
   /**
    * ✅ Feature 32: deterministic decision state hash (snapshot decision JSON)
    */
@@ -61,10 +60,6 @@ export type DecisionSnapshot = {
    * This lets us cryptographically bind "decision history up to seq" to its provenance chain.
    */
   provenance_tail_hash?: HexHash | null;
-
-
-
-
 };
 
 /**
@@ -110,8 +105,6 @@ export type DecisionSnapshotStore = {
     decision_id: string,
     up_to_seq: number
   ): Promise<{ deleted: number }>;
-
-  
 };
 
 /**
@@ -139,7 +132,5 @@ export function shouldPruneEventsAfterSnapshot(
   return !!retention?.prune_events_up_to_latest_snapshot;
 }
 
-
 /** Back-compat alias (older code may refer to SnapshotStore) */
 export type SnapshotStore = DecisionSnapshotStore;
-

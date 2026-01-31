@@ -32,6 +32,7 @@ import { ensureEnterpriseTables } from "./enterprise-schema.js";
 
 import type { DecisionEdgeDirection, DecisionEdgeRecord, DecisionRoleRecord } from "./store.js";
 
+import { replayDecision } from "./engine.js";
 
 // ✅ Feature 15: PLS record (auditable)
 export type PlsShieldRecord = {
@@ -212,11 +213,13 @@ export class SqliteDecisionStore
 
   private init() {
     // decisions
+    // decisions
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decisions (
         decision_id TEXT PRIMARY KEY,
         root_id TEXT NOT NULL,
         version INTEGER NOT NULL,
+        current_version INTEGER NOT NULL DEFAULT 0,
         decision_json TEXT NOT NULL
       );
     `);
@@ -293,6 +296,7 @@ export class SqliteDecisionStore
     `);
 
     // ---- migrations for older DBs ----
+    this.ensureColumn("decisions", "current_version", "INTEGER NOT NULL DEFAULT 0");
     this.ensureColumn("decision_events", "prev_hash", "TEXT");
     this.ensureColumn("decision_events", "hash", "TEXT");
 
@@ -745,66 +749,61 @@ export class SqliteDecisionStore
   }
   
 
-
   // -----------------------------
   // decisions
   // -----------------------------
   async createDecision(decision: Decision): Promise<void> {
-  const decision_id =
-    typeof (decision as any).decision_id === "string" &&
-    (decision as any).decision_id.trim().length > 0
-      ? String((decision as any).decision_id)
-      : null;
+    const decision_id =
+      typeof (decision as any).decision_id === "string" &&
+      (decision as any).decision_id.trim().length > 0
+        ? String((decision as any).decision_id)
+        : null;
 
-  if (!decision_id) {
-    throw new Error("SQLITE_STORE_CREATE_DECISION: decision.decision_id is missing");
-  }
+    if (!decision_id) {
+      throw new Error("SQLITE_STORE_CREATE_DECISION: decision.decision_id is missing");
+    }
 
-  const parent_id =
-    typeof (decision as any).parent_decision_id === "string" &&
-    (decision as any).parent_decision_id.trim().length > 0
-      ? String((decision as any).parent_decision_id)
-      : null;
+    const root_id = decision_id;
 
-  const root_id = decision_id;
+    const ver = Number((decision as any).version ?? 1);
 
-  this.db
-    .prepare(
-      `INSERT OR IGNORE INTO decisions (decision_id, root_id, version, decision_json)
-       VALUES (?, ?, ?, ?);`
-    )
-    .run(decision_id, root_id, Number((decision as any).version ?? 1), JSON.stringify(decision));
+    this.db
+      .prepare(
+        `INSERT OR IGNORE INTO decisions (decision_id, root_id, version, current_version, decision_json)
+         VALUES (?, ?, ?, ?, ?);`
+      )
+      .run(decision_id, root_id, ver, 0, JSON.stringify(decision));
   }
 
   async putDecision(decision: Decision): Promise<void> {
-  const decision_id =
-    typeof (decision as any).decision_id === "string" &&
-    (decision as any).decision_id.trim().length > 0
-      ? String((decision as any).decision_id)
-      : null;
+    const decision_id =
+      typeof (decision as any).decision_id === "string" &&
+      (decision as any).decision_id.trim().length > 0
+        ? String((decision as any).decision_id)
+        : null;
 
-  if (!decision_id) {
-    throw new Error("SQLITE_STORE_PUT_DECISION: decision.decision_id is missing");
-  }
+    if (!decision_id) {
+      throw new Error("SQLITE_STORE_PUT_DECISION: decision.decision_id is missing");
+    }
 
-  const parent_id =
-    typeof (decision as any).parent_decision_id === "string" &&
-    (decision as any).parent_decision_id.trim().length > 0
-      ? String((decision as any).parent_decision_id)
-      : null;
+    const root_id = decision_id;
+    const ver = Number((decision as any).version ?? 1);
 
-  const root_id = decision_id;
-
-  this.db
-    .prepare(
-      `INSERT INTO decisions (decision_id, root_id, version, decision_json)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(decision_id) DO UPDATE SET
-         root_id=excluded.root_id,
-         version=excluded.version,
-         decision_json=excluded.decision_json;`
-    )
-    .run(decision_id, root_id, Number((decision as any).version ?? 1), JSON.stringify(decision));
+    this.db
+      .prepare(
+        `INSERT INTO decisions (decision_id, root_id, version, current_version, decision_json)
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(decision_id) DO UPDATE SET
+           root_id=excluded.root_id,
+           version=excluded.version,
+           current_version=CASE
+             WHEN decisions.current_version IS NULL THEN excluded.current_version
+             WHEN excluded.current_version > decisions.current_version THEN excluded.current_version
+             ELSE decisions.current_version
+           END,
+           decision_json=excluded.decision_json;`
+      )
+      .run(decision_id, root_id, ver, 0, JSON.stringify(decision));
   }
 
   async getDecision(decision_id: string): Promise<Decision | null> {
@@ -812,7 +811,23 @@ export class SqliteDecisionStore
       .prepare(`SELECT decision_json FROM decisions WHERE decision_id=?;`)
       .get(decision_id) as { decision_json: string } | undefined;
 
-    return row ? (JSON.parse(row.decision_json) as Decision) : null;
+    if (!row) return null;
+
+    const base = JSON.parse(row.decision_json) as Decision;
+
+    // ✅ Materialize head by replaying events (ensures getDecision is "truthful")
+    const recs = await this.listEvents(decision_id);
+    if (!recs.length) return base;
+
+    const ordered = [...recs].sort((a, b) => a.seq - b.seq);
+    const events = ordered.map((r) => r.event);
+
+    const rr = replayDecision(base as any, events as any, {
+      now: () => new Date().toISOString(),
+    });
+
+    // If replay fails (shouldn't), fall back to stored JSON
+    return (rr?.decision ?? base) as any;
   }
 
   async getRootDecision(decision_id: string): Promise<Decision | null> {
@@ -826,12 +841,15 @@ export class SqliteDecisionStore
 
   async getCurrentVersion(decision_id: string): Promise<number | null> {
     const row = this.db
-      .prepare(`SELECT version FROM decisions WHERE decision_id=?;`)
-      .get(decision_id) as { version: number } | undefined;
+      .prepare(`SELECT current_version FROM decisions WHERE decision_id=?;`)
+      .get(decision_id) as { current_version: number } | undefined;
 
-    return row ? row.version : null;
+    return row ? Number(row.current_version) : null;
   }
 
+
+
+  
   // -----------------------------
   // Feature 19 helper: hash at seq
   // -----------------------------
@@ -1042,13 +1060,18 @@ export class SqliteDecisionStore
         if (existing) return existing;
       }
 
-      const row = this.db
-        .prepare(
-          `SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_events WHERE decision_id=?;`
-        )
-        .get(decision_id) as { max_seq: number };
+      // ❌ OLD (bad after pruning):
+      // const { max_seq } = db.prepare(`SELECT COALESCE(MAX(seq), 0) AS max_seq FROM decision_events WHERE decision_id=?;`).get(decision_id) as any;
+      // const nextSeq = Number(max_seq ?? 0) + 1;
 
-      const seq = (row?.max_seq ?? 0) + 1;
+      // ✅ NEW (monotonic even if events are pruned):
+      const row =  this.db
+        .prepare(`SELECT current_version FROM decisions WHERE decision_id=? LIMIT 1;`)
+        .get(decision_id) as any;
+
+      const cur = row?.current_version != null ? Number(row.current_version) : 0;
+      const nextSeq = cur + 1;
+      const seq = nextSeq;
 
       const last = await this.getLastEvent(decision_id);
       const prev_hash = last?.hash ?? null;
@@ -1076,8 +1099,11 @@ export class SqliteDecisionStore
             JSON.stringify(event),
             idempotency_key,
             prev_hash,
-            hash
+            hash          
           );
+        this.db
+          .prepare(`UPDATE decisions SET current_version=? WHERE decision_id=?;`)
+          .run(seq, decision_id);
       } catch (e: any) {
         if (idempotency_key && String(e?.message ?? "").includes("UNIQUE")) {
           const existing2 = await this.findEventByIdempotencyKey(

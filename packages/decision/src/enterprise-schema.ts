@@ -169,20 +169,41 @@ export function ensureEnterpriseTables(db: any) {
 
 
 
-  // decision_roles: RBAC mapping (decision_id x actor_id -> role)
-  db.exec(`
-    CREATE TABLE IF NOT EXISTS decision_roles(
-      decision_id TEXT NOT NULL,
-      actor_id    TEXT NOT NULL,
-      role        TEXT NOT NULL,
-      created_at  TEXT NOT NULL,
-      PRIMARY KEY(decision_id, actor_id, role)
-    );
-  `);
+ 
 
+
+
+  // ✅ Feature: Forked Decision Receipts (enterprise audit primitive)
   db.exec(`
-    CREATE INDEX IF NOT EXISTS idx_decision_roles_lookup
-    ON decision_roles(decision_id, actor_id);
+    CREATE TABLE IF NOT EXISTS fork_receipts (
+      branch_decision_id TEXT PRIMARY KEY,
+      source_decision_id TEXT NOT NULL,
+      up_to_seq INTEGER NOT NULL,
+      base_seq INTEGER NOT NULL,
+
+      -- deterministic fingerprint of edits that produced this branch
+      edits_hash TEXT NOT NULL,
+
+      -- optional identity hashes (portable)
+      source_public_state_hash TEXT,
+      branch_public_state_hash TEXT,
+
+      receipt_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_fork_receipts_source
+      ON fork_receipts(source_decision_id);
+
+    CREATE INDEX IF NOT EXISTS idx_fork_receipts_created
+      ON fork_receipts(created_at);
+
+    CREATE INDEX IF NOT EXISTS idx_fork_receipts_branch
+    ON fork_receipts(branch_decision_id);
+
+    CREATE INDEX IF NOT EXISTS idx_fork_receipts_source_created
+    ON fork_receipts(source_decision_id, created_at DESC);
+    
   `);
 
 

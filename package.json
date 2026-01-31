@@ -40,7 +40,14 @@
     "replay:demo": "tsx examples/run-replay-counterfactual.ts",
     "replay:store": "tsx examples/run-replay-from-store.ts",
     "federation:demo": "tsx examples/run-federation-demo.ts",
-    "federation:verify": "tsx examples/run-federation-verify-bundle.ts"
+    "federation:verify": "tsx examples/run-federation-verify-bundle.ts",
+    "decision:anchors:sqlite": "tsx examples/run-decision-anchors-sqlite.ts > /dev/null",
+    "decision:anchors:sqlite:debug": "tsx examples/run-decision-anchors-sqlite.ts",
+    "decision:anchor-tamper:sqlite": "tsx examples/run-decision-anchor-tamper-sqlite.ts",
+    "decision:fork-receipt:sqlite": "tsx examples/run-decision-fork-receipt-sqlite.ts",
+    "decision:fork-receipt-tamper:sqlite": "tsx examples/run-decision-fork-receipt-tamper-sqlite.ts",
+    "decision:dia:sqlite": "tsx examples/run-decision-dia-sqlite.ts",
+    "decision:dia:smoke": "DEBUG_LIABILITY=1 npm run decision:dia:sqlite"
   },
   "author": "",
   "license": "ISC",

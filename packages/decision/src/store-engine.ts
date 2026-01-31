@@ -91,6 +91,9 @@ import {
 import { makeSqliteDiaStore } from "./dia-store-sqlite.js";
 
 
+import { stableStringify } from "./stable-json.js";
+import { computeReceiptHashV1 as computeReceiptHashV1Core } from "./liability-hash.js";
+
 
 // -----------------------------
 // small utils
@@ -99,27 +102,7 @@ function nowIso(opts: DecisionEngineOptions): string {
   return (opts.now ?? (() => new Date().toISOString()))();
 }
 
-function stableStringify(value: unknown): string {
-  const seen = new WeakSet<object>();
-  const norm = (v: any): any => {
-    if (v === null) return null;
-    if (typeof v !== "object") return v;
 
-    if (seen.has(v)) return "[Circular]";
-    seen.add(v);
-
-    if (Array.isArray(v)) return v.map(norm);
-
-    const out: Record<string, any> = {};
-    for (const k of Object.keys(v).sort()) {
-      const vv = v[k];
-      if (typeof vv === "undefined") continue;
-      out[k] = norm(vv);
-    }
-    return out;
-  };
-  return JSON.stringify(norm(value));
-}
 
 function sha256Hex(s: string): string {
   return crypto.createHash("sha256").update(s, "utf8").digest("hex");
@@ -495,46 +478,7 @@ export async function verifyForkReceiptWithStore(
 
 
 
-function computeReceiptHashV1(params: {
-  decision_id: string;
-  event_seq: number;
-  event_type: string;
-  actor_id: string;
-  actor_type: string;
-  trust_score: number;
-  trust_reason: string | null;
 
-  state_before_hash: string | null;
-  state_after_hash: string | null;
-
-  public_state_before_hash: string | null;
-  public_state_after_hash: string | null;
-
-  obligations_hash: string | null;
-  created_at: string;
-}): string {
-  return sha256Hex(
-    stableStringify({
-      kind: "LIABILITY_RECEIPT_HASH_V1",
-      decision_id: params.decision_id,
-      event_seq: params.event_seq,
-      event_type: params.event_type,
-      actor_id: params.actor_id,
-      actor_type: params.actor_type,
-      trust_score: params.trust_score,
-      trust_reason: params.trust_reason,
-
-      state_before_hash: params.state_before_hash,
-      state_after_hash: params.state_after_hash,
-
-      public_state_before_hash: params.public_state_before_hash,
-      public_state_after_hash: params.public_state_after_hash,
-
-      obligations_hash: params.obligations_hash,
-      created_at: params.created_at,
-    })
-  );
-}
 
 
 function computeDecisionEdgeHash(params: {
@@ -607,7 +551,6 @@ function extractDagEdgesFromEvent(params: {
 
 
 
-
 // ✅ Feature 22: verify signatures + detect DB tamper (read/replay guard)
 function verifyRiskLiabilityIntegrityOrThrow(params: {
   store: DecisionStore;
@@ -622,17 +565,16 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
   if (!db) return [];
 
   try {
-    // ✅ verify receipts against canonical replay head (NOT persisted blob)
-    // Raw decision (what engine reconstructed or loaded)
-    // We are verifying DB integrity, so hash the *persisted* decision blob.
-    // Canonical replay is only for diagnostics / comparison.
-    const persistedForCheckRaw = persistedDecision ?? canonicalDecision;
-    const canonicalForCheckRaw = canonicalDecision ?? persistedDecision;
+    // IMPORTANT:
+    // Receipts were computed from the *canonical replay head* (engine output).
+    // decisions.decision_json can drift due to storage quirks / legacy fields.
+    // For integrity checks against receipts, we must hash the canonical head.
+    const persistedRaw = persistedDecision ?? null;
+    const canonicalRaw = canonicalDecision ?? persistedDecision;
 
-    const persistedForCheck = stripNonStateFieldsForHash(persistedForCheckRaw);
-    const canonicalForCheck = stripNonStateFieldsForHash(canonicalForCheckRaw);
+    const persistedForDiag = persistedRaw ? stripNonStateFieldsForHash(persistedRaw) : null;
+    const canonicalForCheck = stripNonStateFieldsForHash(canonicalRaw);
 
-    // 1) Detect decision_json tamper vs latest receipt hashes
     const lastReceipt = db
       .prepare(
         `SELECT event_seq, receipt_hash, state_after_hash, public_state_after_hash
@@ -646,7 +588,9 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
     if (!lastReceipt) return [];
 
     const expectedPublic =
-      lastReceipt.public_state_after_hash != null ? String(lastReceipt.public_state_after_hash) : null;
+      lastReceipt.public_state_after_hash != null
+        ? String(lastReceipt.public_state_after_hash)
+        : null;
 
     const expectedTamper =
       lastReceipt.state_after_hash != null ? String(lastReceipt.state_after_hash) : null;
@@ -661,29 +605,20 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
       const legacyExpected = String(expectedTamper);
       const candidates: Array<{ mode: string; hash: string }> = [];
 
-      // 1) current tamper semantics
+      // compute candidates from CANONICAL head (what receipts were made from)
       try {
         candidates.push({
           mode: "LEGACY_TAMPER_V_CURRENT",
-          hash: computeTamperStateHash(persistedForCheck as any),
+          hash: computeTamperStateHash(canonicalForCheck as any),
         });
-      } catch (e) {}
+      } catch {}
 
-      // 2) current public semantics (some legacy DBs used that)
       try {
         candidates.push({
           mode: "LEGACY_PUBLIC_V_CURRENT",
-          hash: computePublicStateHash(persistedForCheck as any),
+          hash: computePublicStateHash(canonicalForCheck as any),
         });
-      } catch (e) {}
-
-      // 3) strict legacy semantics
-      // NOTE: if you already have a strict legacy hash function in this file, call it here.
-      // If you do NOT have it, you can omit this candidate.
-      try {
-        // If you have something like computeLegacyStrictStateHash, use it:
-        // candidates.push({ mode: "LEGACY_STRICT_STATE_HASH", hash: computeLegacyStrictStateHash(decisionForReceiptCheck as any) });
-      } catch (e) {}
+      } catch {}
 
       const ok = candidates.some((c) => c.hash === legacyExpected);
       if (!ok) {
@@ -700,54 +635,64 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
               computed_candidates: candidates,
               receipt_hash: String(lastReceipt?.receipt_hash ?? ""),
               mode: "LEGACY_SINGLE_HASH",
+              // extra diagnostics (non-authoritative)
+              persisted_public_hash: persistedForDiag
+                ? computePublicStateHash(persistedForDiag as any)
+                : null,
             } as any,
           },
         ];
       }
-    } else {
-      // ✅ DUAL HASH path (public hash is authoritative)
-      const computedPublic = computePublicStateHash(persistedForCheck as any);
 
-      if (String(computedPublic) !== String(expectedPublic)) {
+      return [];
+    }
+
+    // ✅ DUAL HASH path (public hash is authoritative)
+    const computedPublic = computePublicStateHash(canonicalForCheck as any);
+
+    if (String(computedPublic) !== String(expectedPublic)) {
+      return [
+        {
+          code: "DECISION_PUBLIC_HASH_MISMATCH",
+          severity: "BLOCK",
+          message:
+            "Decision public hash mismatch: canonical decision does not match the latest public_state_after_hash receipt.",
+          details: {
+            decision_id,
+            latest_event_seq: Number(lastReceipt?.event_seq ?? 0),
+            expected_public_state_after_hash: String(expectedPublic),
+            computed_public_state_hash: String(computedPublic),
+            receipt_hash: String(lastReceipt?.receipt_hash ?? ""),
+            mode: "DUAL_HASH_PUBLIC",
+            // diagnostics only (helps debug benign drift)
+            persisted_public_state_hash: persistedForDiag
+              ? computePublicStateHash(persistedForDiag as any)
+              : null,
+          } as any,
+        },
+      ];
+    }
+
+    // Optional: also assert tamper hash matches, if present
+    if (expectedTamper) {
+      const computedTamper = computeTamperStateHash(canonicalForCheck as any);
+      if (String(computedTamper) !== String(expectedTamper)) {
         return [
           {
-            code: "DECISION_PUBLIC_HASH_MISMATCH",
+            code: "DECISION_TAMPERED",
             severity: "BLOCK",
             message:
-              "Decision public hash mismatch: stored decision does not match the latest public_state_after_hash receipt.",
+              "Decision tamper hash mismatch: canonical decision does not match latest state_after_hash receipt.",
             details: {
               decision_id,
               latest_event_seq: Number(lastReceipt?.event_seq ?? 0),
-              expected_public_state_after_hash: String(expectedPublic),
-              computed_public_state_hash: String(computedPublic),
+              expected_state_after_hash: String(expectedTamper),
+              computed_tamper_state_hash: String(computedTamper),
               receipt_hash: String(lastReceipt?.receipt_hash ?? ""),
-              mode: "DUAL_HASH_PUBLIC",
+              mode: "DUAL_HASH_TAMPER",
             } as any,
           },
         ];
-      }
-
-      // Optional: also assert tamper hash matches, if present
-      if (expectedTamper) {
-        const computedTamper = computeTamperStateHash(persistedForCheck as any);
-        if (String(computedTamper) !== String(expectedTamper)) {
-          return [
-            {
-              code: "DECISION_TAMPERED",
-              severity: "BLOCK",
-              message:
-                "Decision tamper hash mismatch: canonical decision does not match latest state_after_hash receipt.",
-              details: {
-                decision_id,
-                latest_event_seq: Number(lastReceipt?.event_seq ?? 0),
-                expected_state_after_hash: String(expectedTamper),
-                computed_tamper_state_hash: String(computedTamper),
-                receipt_hash: String(lastReceipt?.receipt_hash ?? ""),
-                mode: "DUAL_HASH_TAMPER",
-              } as any,
-            },
-          ];
-        }
       }
     }
 
@@ -763,6 +708,7 @@ function verifyRiskLiabilityIntegrityOrThrow(params: {
     ];
   }
 }
+
 
 
 
@@ -2731,12 +2677,40 @@ export async function applyEventWithStore(
           });
 
           if (!gateResult.ok) {
+            const gr: any = (gateResult as any).gate_report ?? null;
+
+            // If gate_report contains WORKFLOW_INCOMPLETE anywhere, guarantee it exists in violations.
+            const hasWorkflowIncompleteInReport = (() => {
+              if (!gr) return false;
+              try {
+                const s = JSON.stringify(gr);
+                return s.includes("WORKFLOW_INCOMPLETE");
+              } catch {
+                return false;
+              }
+            })();
+
+            let violations: any[] = Array.isArray((gateResult as any).violations)
+              ? [...(gateResult as any).violations]
+              : [];
+
+            const hasInViolations = violations.some((v) => String(v?.code ?? "") === "WORKFLOW_INCOMPLETE");
+
+            if (hasWorkflowIncompleteInReport && !hasInViolations) {
+              violations.unshift({
+                code: "WORKFLOW_INCOMPLETE",
+                severity: "BLOCK",
+                message: "Workflow incomplete.",
+                details: gr,
+              });
+            }
+
             return {
               ok: false,
               decision: headDecision,
-              violations: gateResult.violations,
+              violations,
               consequence_preview: gateResult.consequence_preview,
-              gate_report: (gateResult as any).gate_report, // ✅ add for explainability
+              gate_report: gr, // ✅ keep for explainability
             } as any;
           }
         }
@@ -2989,12 +2963,11 @@ export async function applyEventWithStore(
         const violations  = Array.isArray(execution?.violations)  ? execution.violations  : [];
 
         const obligations_hash = sha256Hex(
-          JSON.stringify({
+          stableStringify({
             obligations,
             violations,
           })
         );
-
         const t = computeTrust({
           decision_id: input.decision_id,
           event: eventToAppend,
@@ -3031,7 +3004,7 @@ export async function applyEventWithStore(
         });
 
         // receipt_hash should include BOTH hash families (tamper + public) so it’s unambiguous
-        const receipt_hash = computeReceiptHashV1({
+        const receipt_hash = computeReceiptHashV1Core({
           decision_id: receipt.decision_id,
           event_seq: receipt.event_seq,
           event_type: receipt.event_type,
@@ -3042,10 +3015,8 @@ export async function applyEventWithStore(
 
           state_before_hash: receipt.state_before_hash ?? null,
           state_after_hash: receipt.state_after_hash ?? null,
-
           public_state_before_hash: publicBeforeHash,
           public_state_after_hash: publicAfterHash,
-
           obligations_hash,
           created_at: receipt.created_at,
         });

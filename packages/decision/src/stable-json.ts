@@ -24,7 +24,3 @@ export function stableStringify(value: unknown): string {
   return JSON.stringify(stableNormalize(value));
 }
 
-export default {
-  stableNormalize,
-  stableStringify,
-};

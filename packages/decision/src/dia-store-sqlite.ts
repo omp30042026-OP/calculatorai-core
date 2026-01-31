@@ -1,7 +1,6 @@
 // packages/decision/src/dia-store-sqlite.ts
 import { computeDiaHashV1, type DiaStore } from "./dia.js";
-import stableJson from "./stable-json.js";
-const { stableStringify } = stableJson as any;
+import { stableStringify } from "./stable-json.js";
 
 
 export function ensureDiaTables(db: any) {

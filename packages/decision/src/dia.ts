@@ -1,7 +1,6 @@
 // packages/decision/src/dia.ts
 import crypto from "node:crypto";
-import stableJson from "./stable-json.js";
-const { stableStringify } = stableJson as any;
+import { stableStringify } from "./stable-json.js";
 
 
 

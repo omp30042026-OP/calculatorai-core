@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import type { Decision } from "./decision";
 import type { DecisionEvent } from "./events";
+import { computePublicStateHash } from "./state-hash.js";
 
 // -----------------------------
 // Feature 14 — Decision Provenance Graph (chain)
@@ -10,16 +11,27 @@ import type { DecisionEvent } from "./events";
 // -----------------------------
 
 export type ProvenanceNode = {
+  // ✅ NEW: explicit version seal
+  version: "PROV_V1";
+
   node_id: string;
-  node_hash: string; // ✅ NEW: stored hash of this node (tamper-proof)
-  
+  node_hash: string; // stored hash of this node (tamper-proof)
+
   seq: number;
 
-  at: string;
+  // ✅ Canonical: event time is the truth
+  event_at: string;
+
+  // (optional but useful) equals event_at in V1 (kept for audit readability)
+  created_at: string;
+
   decision_id: string;
 
   event_type: string;
   actor_id: string | null;
+
+  // ✅ NEW: actor_type becomes part of the prov identity (needed for audit)
+  actor_type: string | null;
 
   // hash of the applied event payload (sanitized)
   event_hash: string;
@@ -31,6 +43,18 @@ export type ProvenanceNode = {
   // hashes of decision states (sanitized)
   state_before_hash: string;
   state_after_hash: string;
+
+  // ✅ NEW: optional public-state hashes (safe to expose externally)
+  public_state_before_hash: string | null;
+  public_state_after_hash: string | null;
+
+  // ✅ NEW: trust envelope captured into provenance (foundation for enterprise proofs)
+  trust: {
+    origin_zone: string | null;
+    origin_system: string | null;
+    channel: string | null;
+    tenant_id: string | null;
+  } | null;
 
   // optional debugging metadata (safe, small)
   meta?: Record<string, unknown> | null;
@@ -170,7 +194,7 @@ function computeNodeId(payload: any): string {
 }
 
 function computeNodeHash(node: ProvenanceNode): string {
-  const { node_hash: _ignore, at: _at, ...rest } = node as any; // ✅ ignore at
+  const { node_hash: _ignore, ...rest } = node as any; // ✅ ignore ONLY node_hash
   return sha256Hex(stableStringify(rest));
 }
 
@@ -192,31 +216,70 @@ function computeEventHash(e: any): string {
 }
 
 function payloadForNodeId(x: {
+  version: any;
   decision_id: any;
   seq: any;
+
   event_type: any;
   actor_id: any;
+  actor_type: any;
+
+  event_at: any;
+
   event_hash: any;
   prev_node_id: any;
   prev_node_hash: any;
+
   state_before_hash: any;
   state_after_hash: any;
+
+  public_state_before_hash: any;
+  public_state_after_hash: any;
+
+  trust: any;
 }) {
+  const trust =
+    x.trust && typeof x.trust === "object"
+      ? {
+          origin_zone: typeof x.trust.origin_zone === "string" ? x.trust.origin_zone : null,
+          origin_system: typeof x.trust.origin_system === "string" ? x.trust.origin_system : null,
+          channel: typeof x.trust.channel === "string" ? x.trust.channel : null,
+          tenant_id: typeof x.trust.tenant_id === "string" ? x.trust.tenant_id : null,
+        }
+      : null;
+
   return {
-    decision_id: typeof x.decision_id === "string" ? x.decision_id : String(x.decision_id ?? "unknown"),
+    version: x.version === "PROV_V1" ? "PROV_V1" : "PROV_V1",
+    decision_id:
+      typeof x.decision_id === "string" ? x.decision_id : String(x.decision_id ?? "unknown"),
     seq: typeof x.seq === "number" ? x.seq : Number(x.seq ?? 0),
-    event_type: typeof x.event_type === "string" ? x.event_type : String(x.event_type ?? "UNKNOWN"),
+
+    event_type:
+      typeof x.event_type === "string" ? x.event_type : String(x.event_type ?? "UNKNOWN"),
+
     actor_id: typeof x.actor_id === "string" ? x.actor_id : null,
+    actor_type: typeof x.actor_type === "string" ? x.actor_type : null,
+
+    event_at: typeof x.event_at === "string" ? x.event_at : String(x.event_at ?? ""),
+
     event_hash: typeof x.event_hash === "string" ? x.event_hash : String(x.event_hash ?? ""),
+
     prev_node_id: typeof x.prev_node_id === "string" ? x.prev_node_id : null,
     prev_node_hash: typeof x.prev_node_hash === "string" ? x.prev_node_hash : null,
+
     state_before_hash:
       typeof x.state_before_hash === "string" ? x.state_before_hash : String(x.state_before_hash ?? ""),
     state_after_hash:
       typeof x.state_after_hash === "string" ? x.state_after_hash : String(x.state_after_hash ?? ""),
+
+    public_state_before_hash:
+      typeof x.public_state_before_hash === "string" ? x.public_state_before_hash : null,
+    public_state_after_hash:
+      typeof x.public_state_after_hash === "string" ? x.public_state_after_hash : null,
+
+    trust,
   };
 }
-
 
 function isoToSecond(iso: string): string {
   const d = new Date(iso);
@@ -271,6 +334,24 @@ export function applyProvenanceTransition(input: {
   );
 
 
+  const event_at = isoToSecond(atIso); // ✅ canonical (seconds precision)
+  const created_at = event_at;         // ✅ V1 rule
+
+  const actor_type =
+    typeof (input.event as any)?.actor_type === "string" ? String((input.event as any).actor_type) : null;
+
+  const trustIn = (lastHistory as any)?.trust ?? (input.event as any)?.trust ?? null;
+  const trust =
+    trustIn && typeof trustIn === "object"
+      ? {
+          origin_zone: typeof trustIn?.origin?.zone === "string" ? trustIn.origin.zone : null,
+          origin_system: typeof trustIn?.origin?.system === "string" ? trustIn.origin.system : null,
+          channel: typeof trustIn?.origin?.channel === "string" ? trustIn.origin.channel : null,
+          tenant_id: typeof trustIn?.origin?.tenant_id === "string" ? trustIn.origin.tenant_id : null,
+        }
+      : null;
+
+
   const seq = historyLen; // 1:1 with history length
 
   const actor_id =
@@ -307,33 +388,51 @@ export function applyProvenanceTransition(input: {
     reason: (lastHistory as any)?.reason ?? null,
     });
 
-  const nodePayloadForId = {
+    const nodePayloadForId = payloadForNodeId({
+    version: "PROV_V1",
     decision_id,
     seq,
+
     event_type,
     actor_id,
+    actor_type,
+
+    event_at,
+
     event_hash,
     prev_node_id,
     prev_node_hash,
+
     state_before_hash,
     state_after_hash,
-  };
+
+    public_state_before_hash: computePublicStateHash(before),
+    public_state_after_hash: computePublicStateHash(after),
+
+    trust,
+  });
 
   const node_id = computeNodeId(nodePayloadForId);
 
   // build node WITHOUT node_hash first (no placeholder needed)
-  const nodeNoHash = {
+    const nodeNoHash = {
+    version: "PROV_V1",
     node_id,
     seq,
-    at: atIso,
+    event_at,
+    created_at,
     decision_id,
     event_type,
     actor_id,
+    actor_type,
     event_hash,
     prev_node_id,
     prev_node_hash,
     state_before_hash,
     state_after_hash,
+    public_state_before_hash: computePublicStateHash(before),
+    public_state_after_hash: computePublicStateHash(after),
+    trust,
     meta: null,
   } as Omit<ProvenanceNode, "node_hash">;
 
@@ -417,18 +516,30 @@ export function verifyProvenanceChain(decision: Decision): ProvenanceVerifyResul
     }
 
     // node_id integrity (recompute from deterministic payload fields)
-    const expectedId = computeNodeId(
-        payloadForNodeId({
-            decision_id: n.decision_id,
-            seq: n.seq,
-            event_type: n.event_type,
-            actor_id: n.actor_id,
-            event_hash: (n as any).event_hash,
-            prev_node_id: n.prev_node_id,
-            prev_node_hash: n.prev_node_hash,
-            state_before_hash: n.state_before_hash,
-            state_after_hash: n.state_after_hash,
-        })
+        const expectedId = computeNodeId(
+      payloadForNodeId({
+        version: (n as any).version ?? "PROV_V1",
+        decision_id: n.decision_id,
+        seq: n.seq,
+
+        event_type: n.event_type,
+        actor_id: n.actor_id,
+        actor_type: (n as any).actor_type ?? null,
+
+        event_at: (n as any).event_at ?? (n as any).at ?? "",
+
+        event_hash: (n as any).event_hash,
+        prev_node_id: n.prev_node_id,
+        prev_node_hash: n.prev_node_hash,
+
+        state_before_hash: n.state_before_hash,
+        state_after_hash: n.state_after_hash,
+
+        public_state_before_hash: (n as any).public_state_before_hash ?? null,
+        public_state_after_hash: (n as any).public_state_after_hash ?? null,
+
+        trust: (n as any).trust ?? null,
+      })
     );
 
     if (n.node_id !== expectedId) {
@@ -483,35 +594,83 @@ export function migrateProvenanceChain(decision: Decision): Decision {
     const n0: any = nodes[i] ?? {};
 
     const payload = payloadForNodeId({
-        decision_id: n0.decision_id,
-        seq: n0.seq,
-        event_type: n0.event_type,
-        actor_id: n0.actor_id,
-        event_hash: n0.event_hash,
-        prev_node_id: prevId,
-        prev_node_hash: prevHash,
-        state_before_hash: n0.state_before_hash,
-        state_after_hash: n0.state_after_hash,
+      version: "PROV_V1",
+      decision_id: n0.decision_id,
+      seq: n0.seq,
+
+      event_type: n0.event_type,
+      actor_id: n0.actor_id,
+      actor_type: (n0 as any)?.actor_type ?? null,
+
+      // Accept old fields: at / event_at
+      event_at: (n0 as any)?.event_at ?? (n0 as any)?.at ?? "",
+
+      event_hash: n0.event_hash,
+      prev_node_id: prevId,
+      prev_node_hash: prevHash,
+
+      state_before_hash: n0.state_before_hash,
+      state_after_hash: n0.state_after_hash,
+
+      public_state_before_hash: (n0 as any)?.public_state_before_hash ?? null,
+      public_state_after_hash: (n0 as any)?.public_state_after_hash ?? null,
+
+      trust: (n0 as any)?.trust ?? null,
     });
 
     const node_id = computeNodeId(payload);
 
+    const event_at =
+      typeof n0.event_at === "string" && n0.event_at.length
+        ? isoToSecond(n0.event_at)
+        : typeof n0.at === "string" && n0.at.length
+          ? isoToSecond(n0.at)
+          : "";
+
+    const trust0 = n0.trust ?? null;
+    const trust =
+      trust0 && typeof trust0 === "object"
+        ? {
+            origin_zone: typeof trust0.origin_zone === "string" ? trust0.origin_zone : null,
+            origin_system: typeof trust0.origin_system === "string" ? trust0.origin_system : null,
+            channel: typeof trust0.channel === "string" ? trust0.channel : null,
+            tenant_id: typeof trust0.tenant_id === "string" ? trust0.tenant_id : null,
+          }
+        : null;
+
     const base: ProvenanceNode = {
+      version: "PROV_V1",
       node_id,
       node_hash: "TEMP",
+
       seq: payload.seq,
-      at: typeof n0.at === "string" && n0.at.length ? isoToSecond(n0.at) : "",
+
+      event_at,
+      created_at: event_at,
+
       decision_id: payload.decision_id,
+
       event_type: payload.event_type,
       actor_id: payload.actor_id,
+      actor_type: typeof n0.actor_type === "string" ? n0.actor_type : null,
+
       event_hash: payload.event_hash,
+
       prev_node_id: payload.prev_node_id,
       prev_node_hash: payload.prev_node_hash,
+
       state_before_hash: payload.state_before_hash,
       state_after_hash: payload.state_after_hash,
+
+      public_state_before_hash:
+        typeof n0.public_state_before_hash === "string" ? n0.public_state_before_hash : null,
+      public_state_after_hash:
+        typeof n0.public_state_after_hash === "string" ? n0.public_state_after_hash : null,
+
+      trust,
+
       meta: n0.meta ?? null,
     };
-
     const node_hash = computeNodeHash(base);
 
     const node: ProvenanceNode = { ...base, node_hash };

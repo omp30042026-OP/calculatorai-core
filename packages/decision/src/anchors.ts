@@ -14,6 +14,9 @@ export type DecisionAnchorRecord = {
   // ✅ Feature 32: decision state attestation
   state_hash?: string | null;
 
+  // ✅ Optional: bind provenance tail at snapshot boundary
+  provenance_tail_hash?: string | null;
+
   // tamper-evident global chain
   prev_hash?: string | null;
   hash?: string | null;
@@ -48,7 +51,6 @@ export type DecisionAnchorStore = {
     keep_last_n: number
   ): Promise<{ deleted: number; remaining: number }>;
 };
-
 
 export type AnchorPolicy = {
   enabled: boolean;
@@ -93,6 +95,7 @@ export function computeAnchorHash(input: {
   checkpoint_hash?: string | null;
   root_hash?: string | null;
   state_hash?: string | null; // ✅ Feature 32
+  provenance_tail_hash?: string | null; // ✅ optional
   prev_hash?: string | null;
 }): string {
   const payload = stableStringify({
@@ -103,6 +106,7 @@ export function computeAnchorHash(input: {
     checkpoint_hash: input.checkpoint_hash ?? null,
     root_hash: input.root_hash ?? null,
     state_hash: input.state_hash ?? null, // ✅ Feature 32
+    provenance_tail_hash: input.provenance_tail_hash ?? null, // ✅ optional
     prev_hash: input.prev_hash ?? null,
   });
 

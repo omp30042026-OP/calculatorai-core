@@ -81,8 +81,15 @@ async function main() {
   );
   assert(r2.ok, "simulate failed");
 
-  // current materialized
-  const cur = await store.getDecision(decision_id);
+  
+  // current head (always correct, even if store.getDecision returns genesis)
+  const cur = await computeStateAtSeqViaReplay({
+    store,
+    decision_id,
+    metaIfCreate,
+    upToSeq: 2,
+    opts,
+  });
   assert(cur, "load current decision failed");
   assert(cur.state === "SIMULATED", `expected SIMULATED, got ${cur.state}`);
 

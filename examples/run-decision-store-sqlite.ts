@@ -43,15 +43,15 @@ function makeDeterministicNow(startIso = "2025-01-01T00:00:00.000Z") {
 }
 
 // ---- SQLite-backed DecisionStore (root/current separated via kind) ----
-class SqliteDecisionStore implements DecisionStore {
-  private db: Database.Database;
+export class SqliteDecisionStore implements DecisionStore {
+  public db: Database.Database; // 👈 make it public so examples can query/tamper the same DB
 
-  constructor(filename = ":memory:") {
-    this.db = new Database(filename);
+  constructor(filenameOrDb: string | Database.Database = ":memory:") {
+    this.db = typeof filenameOrDb === "string" ? new Database(filenameOrDb) : filenameOrDb;
     this.db.pragma("journal_mode = WAL");
     this.migrate();
   }
-
+  
   private migrate() {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS decisions (
