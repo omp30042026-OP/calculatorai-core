@@ -44,3 +44,8 @@ priv.pem
 pub.pem
 *.pem
 
+# local demo / scratch decisions
+decision_patch.json
+decision_nopatch.json
+decision*.json
+
