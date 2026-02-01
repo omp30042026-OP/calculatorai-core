@@ -32,3 +32,9 @@ node_modules/
 *.sqlite-shm
 /tmp-*.ts
 /test-liability.db
+
+# CLI outputs
+exported.json
+signed.json
+decision.json
+*.db
