@@ -38,3 +38,9 @@ exported.json
 signed.json
 decision.json
 *.db
+
+# local crypto keys (never commit)
+priv.pem
+pub.pem
+*.pem
+
