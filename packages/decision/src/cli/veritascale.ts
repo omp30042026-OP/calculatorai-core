@@ -4,7 +4,9 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 
-const crypto = require("node:crypto");
+import * as crypto from "node:crypto";
+
+import { sealDecision } from "../seal.js";
 
 /**
  * NOTE:
@@ -18,11 +20,12 @@ import {
   computePublicStateHash,
   computeTamperStateHash,
   normalizeForStateHash,
+  stripNonStateFieldsForHash,
 } from "../state-hash.js";
+
 import { stableStringify } from "../stable-json.js";
 
-// ---- types ----
-type AnyRecord = Record<string, unknown>;
+
 
 type VerifyResult = {
   ok: boolean;
@@ -41,6 +44,16 @@ type VerifyResult = {
     tamper_state_hash: boolean | null;
   };
   note: string | null;
+
+ signatures: {
+    requested: boolean;
+    pubkey: string | null;
+    ok: boolean | null;
+    details: Array<{ index: number; ok: boolean; reason: string | null; key_id: string | null }>;
+    note: string | null;
+  };
+
+
 };
 
 type DiaStatsResult = {
@@ -84,14 +97,16 @@ Usage:
 
   veritascale hash <file.json>
   veritascale normalize <file.json>
-  veritascale verify <file.json> [--json] [--strict]
-  veritascale sign <file.json> --key <path> [--out <file.json>] [--actor <id>] [--embed-pub]
   veritascale verify <file.json> [--json] [--strict] [--verify-sigs] [--pubkey <path>]
+  veritascale sign <file.json> --key <path> [--out <file.json>] [--actor <id>] [--embed-pub] [--replace]
+  veritascale seal <file.json> --key <path> [--out <file.json>] [--actor <id>] [--embed-pub]
+  
 
   veritascale dia stats --db <path> [--json]
   veritascale dia export --db <path> --decision <id> [--out <file.json>]
   veritascale dia verify --db <path> --decision <id> [--json] [--strict]
-    veritascale dia verify --db <path> --decision <id> [--json] [--strict] [--verify-sigs] [--pubkey <path>]
+  veritascale dia verify --db <path> --decision <id> [--json] [--strict] [--verify-sigs] [--pubkey <path>]
+  veritascale seal <file.json> --key <path> [--out <file.json>] [--actor <id>] [--embed-pub]
 
 Examples:
   veritascale hash decision.json
@@ -155,12 +170,18 @@ function keyFingerprintSha256(publicKeyPem: string): string {
   return crypto.createHash("sha256").update(der).digest("hex");
 }
 
-function buildSignaturePayload(decision: unknown): { decision_id: string | null; public_state_hash: string; tamper_state_hash: string } {
-    const d = decision as any;
+function buildSignaturePayload(
+  decision: unknown
+): { decision_id: string | null; public_state_hash: string; tamper_state_hash: string } {
+  const d = decision as any;
+
+  // Canonical-first: signatures must be over the same “state” that hashing uses.
+  const canonical = stripNonStateFieldsForHash(decision as any);
+
   return {
     decision_id: d?.decision_id ?? d?.id ?? null,
-    public_state_hash: computePublicStateHash(decision),
-    tamper_state_hash: computeTamperStateHash(decision),
+    public_state_hash: computePublicStateHash(canonical),
+    tamper_state_hash: computeTamperStateHash(canonical),
   };
 }
 
@@ -264,7 +285,18 @@ function cmdNormalize(filePath: string): void {
   process.stdout.write(stableStringify(norm) + "\n");
 }
 
-function cmdSign(filePath: string, keyPath: string, outFile: string | null, actorId: string | null, embedPub: boolean) {
+
+
+
+
+function cmdSign(
+  filePath: string,
+  keyPath: string,
+  outFile: string | null,
+  actorId: string | null,
+  embedPub: boolean,
+  replace: boolean
+) {
   const decision = readJsonFile(filePath);
 
   const sig = signDecision({
@@ -275,7 +307,9 @@ function cmdSign(filePath: string, keyPath: string, outFile: string | null, acto
   });
 
   const d = decision as any;
-  if (!Array.isArray(d.signatures)) d.signatures = [];
+
+  // ✅ FIX: stop stacking if --replace is passed
+  if (!Array.isArray(d.signatures) || replace) d.signatures = [];
   d.signatures.push(sig);
 
   const target = outFile ?? filePath;
@@ -286,7 +320,33 @@ function cmdSign(filePath: string, keyPath: string, outFile: string | null, acto
   process.stdout.write(`[veritascale] key_id: ${sig.key_id}\n`);
 }
 
+function cmdSeal(
+  filePath: string,
+  keyPath: string,
+  outFile: string | null,
+  actorId: string | null,
+  embedPub: boolean
+): void {
+  const decision = readJsonFile(filePath) as any;
 
+  const privateKeyPem = fs.readFileSync(path.resolve(process.cwd(), keyPath), "utf8");
+
+  const sealed = sealDecision({
+    decision,
+    privateKeyPem,
+    actorId: actorId ?? null,
+    embedPub,
+  });
+
+  const target = outFile ?? filePath;
+  const abs = path.resolve(process.cwd(), target);
+  fs.writeFileSync(abs, JSON.stringify(sealed, null, 2) + "\n", "utf8");
+
+  process.stdout.write(`[veritascale] sealed: ${target}\n`);
+  process.stdout.write(`[veritascale] public_state_hash: ${sealed.public_state_hash}\n`);
+  process.stdout.write(`[veritascale] tamper_state_hash: ${sealed.tamper_state_hash}\n`);
+  process.stdout.write(`[veritascale] key_id: ${sealed.signatures?.[0]?.key_id ?? "(missing)"}\n`);
+}
 
 
 function computeVerify(
@@ -323,8 +383,27 @@ function computeVerify(
         sig_note = "No signatures found.";
     } else {
         sig_details = sigs.map((s: any, idx: number) => {
-        const r = verifyOneSignature(s, pubOverride);
-        return { index: idx, ok: r.ok, reason: r.reason ?? null, key_id: s?.key_id ?? null };
+            const r = verifyOneSignature(s, pubOverride);
+
+            // Strong binding: signature payload must match this decision's computed hashes
+            if (r.ok) {
+            const p = s?.payload ?? null;
+            const binds =
+                p &&
+                p.public_state_hash === computed_public &&
+                p.tamper_state_hash === computed_tamper;
+
+            if (!binds) {
+                return {
+                index: idx,
+                ok: false,
+                reason: "payload_hash_mismatch",
+                key_id: s?.key_id ?? null,
+                };
+            }
+            }
+
+            return { index: idx, ok: r.ok, reason: r.reason ?? null, key_id: s?.key_id ?? null };
         });
         sigs_ok = sig_details.every((x) => x.ok === true);
         sig_note = sigs_ok ? null : "One or more signatures failed verification.";
@@ -340,23 +419,30 @@ function computeVerify(
 
     const ok = hashes_ok && (sigs_ok === null ? true : sigs_ok === true);
 
-  const note: string | null =
+   const note: string | null =
     missingStored
       ? (strict
           ? "Strict mode: missing stored hashes (public_state_hash/tamper_state_hash)."
           : "No stored hashes found in decision; verify computed-only.")
-      : null;
+      : (strict && sigs_ok === false
+          ? "Strict mode: signature verification failed (or signatures missing)."
+          : null);
 
   if (asJson) {
     const out: VerifyResult = {
-        
-
       ok,
       file: fileLabel,
       strict,
       computed: { public_state_hash: computed_public, tamper_state_hash: computed_tamper },
       stored: { public_state_hash: stored_public, tamper_state_hash: stored_tamper },
       match: { public_state_hash: public_match, tamper_state_hash: tamper_match },
+      signatures: {
+        requested: verifySigs || strict,
+        pubkey: pubkeyPath,
+        ok: sigs_ok,
+        details: sig_details ?? [],
+        note: sig_note,
+      },
       note,
     };
     writeJsonPretty(out);
@@ -379,6 +465,20 @@ function computeVerify(
     }
 
     process.stdout.write(ok ? "OK\n" : "FAIL\n");
+
+        if (verifySigs || strict) {
+      process.stdout.write(`signatures requested: true\n`);
+      process.stdout.write(`signatures ok: ${sigs_ok === null ? "(n/a)" : String(sigs_ok)}\n`);
+      if (sig_note) process.stdout.write(`signatures note: ${sig_note}\n`);
+      if (sig_details && sig_details.length > 0) {
+        for (const d of sig_details) {
+          process.stdout.write(
+            `  sig[${d.index}] ok=${String(d.ok)} key_id=${d.key_id ?? "(none)"} reason=${d.reason ?? "(none)"}\n`
+          );
+        }
+      }
+    }
+
   }
 
   return ok;
@@ -726,6 +826,28 @@ export function run(argv: string[] = process.argv): void {
     process.exit(1);
   }
 
+  if (cmd === "seal") {
+        const file = args[1];
+        const keyPath = getFlagValue(args, "--key");
+        const outFile = getFlagValue(args, "--out");
+        const actorId = getFlagValue(args, "--actor");
+        const embedPub = args.includes("--embed-pub");
+
+        if (!file || file.startsWith("--")) {
+            console.error("Missing file.\n");
+            console.error(usage());
+            process.exit(1);
+        }
+        if (!keyPath) {
+            console.error("Missing --key <path>\n");
+            console.error(usage());
+            process.exit(1);
+        }
+
+        cmdSeal(file, keyPath, outFile, actorId, embedPub);
+        process.exit(0);
+    }
+
   // planned stubs (future)
   if (cmd === "sign") {
     const file = args[1];
@@ -745,19 +867,42 @@ export function run(argv: string[] = process.argv): void {
         process.exit(1);
     }
 
-    cmdSign(file, keyPath, outFile, actorId, embedPub);
+
+    const replace = true; // default to replace; no accidental stacking
+    cmdSign(file, keyPath, outFile, actorId, embedPub, replace);
     process.exit(0);
+
+    
+
     }
+
+
+   
+
 
   console.error(`Unknown command: ${cmd}\n`);
   console.error(usage());
   process.exit(1);
+
+   
+
+
 }
 
-// allow: tsx packages/decision/src/cli/veritascale.ts --help
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const _req = (globalThis as any).require as NodeRequire | undefined;
-if (_req && _req.main === module) {
-  run(process.argv);
+// Entrypoint: works under both CommonJS (node) and tsx (ESM)
+const g: any = globalThis as any;
+
+// CJS path (node require)
+if (typeof g.require === "function") {
+  const req = g.require as NodeRequire;
+  if (req.main === module) {
+    run(process.argv);
+  }
+} else {
+  // ESM / tsx path: execute when this file is the invoked script
+  const argv1 = process.argv[1] ?? "";
+  if (argv1.includes("veritascale.ts") || argv1.includes("veritascale.js")) {
+    run(process.argv);
+  }
 }
 

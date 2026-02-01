@@ -147,6 +147,32 @@ export const DecisionSignatureSchema = z.object({
 });
 export type DecisionSignature = z.infer<typeof DecisionSignatureSchema>;
 
+
+// ✅ Canonical meta fields (optional, but strongly recommended)
+
+const DecisionAttributionSchema = z
+  .object({
+    source: z.string().nullable().optional(),     // e.g. "AI" | "HUMAN" | "IMPORT"
+    system_id: z.string().nullable().optional(),  // e.g. "veritascale"
+    model: z.string().nullable().optional(),      // e.g. "gpt"
+    actor_id: z.string().nullable().optional(),   // optional human/system id
+    notes: z.string().nullable().optional(),
+  })
+  .passthrough()
+  .optional();
+
+const ResponsibilityGraphSchema = z
+  .object({
+    actors: z.array(z.unknown()).optional(), // keep loose unless you want a strict actor schema
+    edges: z.array(z.unknown()).optional(),  // keep loose unless you want a strict edge schema
+    version: z.string().nullable().optional(),
+    notes: z.string().nullable().optional(),
+  })
+  .passthrough()
+  .optional();
+
+
+
 export const DecisionSchema = z.object({
   decision_id: z.string(),
   version: z.number().int().min(1).default(1),
@@ -157,7 +183,18 @@ export const DecisionSchema = z.object({
   created_at: z.string(),
   updated_at: z.string(),
 
-  meta: z.record(z.string(), z.unknown()).default({}),
+  meta: z
+    .object({
+      // ✅ Canonical, hash-affecting fields (once materialized)
+      attribution: DecisionAttributionSchema,
+      responsibility_graph: ResponsibilityGraphSchema,
+
+      // 🧩 Draft helper fields (hash-neutral because you strip them in state-hash.ts)
+      attribution_patch: z.unknown().optional(),
+      responsibility_graph_patch: z.unknown().optional(),
+    })
+    .passthrough()
+    .default({}),
   artifacts: DecisionArtifactsSchema,
 
   accountability: DecisionAccountabilitySchema.optional(),

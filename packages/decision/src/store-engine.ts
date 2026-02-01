@@ -1009,7 +1009,37 @@ function isApprovalLike(event: DecisionEvent): boolean {
   return event.type === "APPROVE" || event.type === "REJECT";
 }
 
+function materializeMetaPatchesOnFinalize(decision: any, event: any): any {
+  if (!decision || typeof decision !== "object") return decision;
 
+  const t = String(event?.type ?? "");
+  const FINALIZE = new Set(["APPROVE", "REJECT", "PUBLISH"]);
+  if (!FINALIZE.has(t)) return decision;
+
+  const meta = (decision as any).meta && typeof (decision as any).meta === "object"
+    ? (decision as any).meta
+    : {};
+
+  const ap = meta?.attribution_patch;
+  const rgp = meta?.responsibility_graph_patch;
+
+  // Only write canonical fields if missing (do NOT overwrite existing canonical)
+  const nextMeta: any = { ...meta };
+
+  if (nextMeta.attribution == null && ap != null) {
+    nextMeta.attribution = ap;
+  }
+
+  if (nextMeta.responsibility_graph == null && rgp != null) {
+    nextMeta.responsibility_graph = rgp;
+  }
+
+  // Optional cleanup: remove patch fields once finalized
+  delete nextMeta.attribution_patch;
+  delete nextMeta.responsibility_graph_patch;
+
+  return { ...(decision as any), meta: nextMeta };
+}
 
 function hasAnyRole(roles: string[], allowed: string[]) {
   const s = new Set(roles.map(String));
@@ -2843,10 +2873,12 @@ export async function applyEventWithStore(
           } as any)
         : (withProv as any);
 
-     const toPersist = bindDecisionId(withPLS, input.decision_id);
+     let toPersist = bindDecisionId(withPLS, input.decision_id);
       // ✅ DO NOT persist here — we persist once at the end, after receipts/ledger/snapshots.
       // This prevents double-write and keeps downstream steps referencing a single canonical persist point.
 
+      // ✅ Materialize meta patches into canonical fields on finalize
+      toPersist = materializeMetaPatchesOnFinalize(toPersist as any, eventToAppend as any) as any;
 
     // ✅ Feature 15 (Option B): persist PLS shield row (auditable)
     if (db && shouldWritePLS) {

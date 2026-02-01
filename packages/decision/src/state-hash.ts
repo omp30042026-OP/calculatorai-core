@@ -29,6 +29,22 @@ export function stripNonStateFieldsForHash(decision: any) {
   delete d.updated_at;
   delete d.version;
 
+  // Derived hashes (must NEVER affect hashes; avoids self-referential hashing)
+  delete d.public_state_hash;
+  delete d.tamper_state_hash;
+
+  // Optional alternate storage locations (belt-and-suspenders)
+  if (d?.hashes && typeof d.hashes === "object") {
+    delete d.hashes.public;
+    delete d.hashes.tamper;
+  }
+  if (d?.state && typeof d.state === "object") {
+    delete d.state.public_state_hash;
+    delete d.state.tamper_state_hash;
+    delete d.state.public_hash;
+    delete d.state.tamper_hash;
+  }
+
   // Derived / replay-only
   delete d.history;
   delete d.accountability;
@@ -142,6 +158,7 @@ export function computePublicStateHash(decision: any): string {
  * Back-compat: computeDecisionStateHash historically meant "the state hash".
  * We now define it as the tamper hash (store-integrity).
  */
+
 export function computeDecisionStateHash(decision: any): string {
   return computeTamperStateHash(decision);
 }
