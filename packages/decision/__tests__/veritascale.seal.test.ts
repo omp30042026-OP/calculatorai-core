@@ -177,5 +177,21 @@ describe("veritascale seal", () => {
 });
 
 
+it("sign --replace keeps signatures at 1", () => {
+  const dir = tmpdir();
+  const f = path.join(dir, "decision.json");
+
+  writeJson(f, { decision_id: "s1", meta: {}, signatures: [] });
+
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  fs.writeFileSync(path.join(dir, "priv.pem"), privateKey.export({ format: "pem", type: "pkcs8" }).toString(), "utf8");
+
+  expect(run("veritascale", ["sign", "decision.json", "--key", "priv.pem", "--replace", "--embed-pub"], dir).code).toBe(0);
+  expect(readJson(f).signatures?.length ?? 0).toBe(1);
+
+  expect(run("veritascale", ["sign", "decision.json", "--key", "priv.pem", "--replace", "--embed-pub"], dir).code).toBe(0);
+  expect(readJson(f).signatures?.length ?? 0).toBe(1);
+});
+
 
 });
