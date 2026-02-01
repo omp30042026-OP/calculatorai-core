@@ -4,6 +4,16 @@
   "description": "Core decision, risk, and explainability engine",
   "main": "index.js",
   "type": "commonjs",
+  "bin": {
+    "veritascale": "bin/veritascale"
+  },
+  "files": [
+    "bin",
+    "packages"
+  ],
+
+
+
   "scripts": {
     "explain:single": "tsx examples/run-explain-tree.ts > /dev/null",
     "explain:multi": "tsx examples/run-explain-multi.ts > /dev/null",
@@ -61,6 +71,7 @@
     "zod": "^4.2.1"
   },
   "dependencies": {
-    "better-sqlite3": "^12.5.0"
+    "better-sqlite3": "^12.5.0",
+    "tsx": "^4.21.0"
   }
 }

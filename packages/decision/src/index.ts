@@ -102,3 +102,9 @@ export type {
   PersistCounterfactualBranchInput,
   PersistCounterfactualBranchResult,
 } from "./store-engine.js";
+
+
+export * from "./verify-integrity.js";
+
+
+

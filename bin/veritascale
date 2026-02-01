@@ -1,0 +1,37 @@
+#!/usr/bin/env node
+"use strict";
+
+const fs = require("node:fs");
+const path = require("node:path");
+const { spawnSync } = require("node:child_process");
+
+function resolveTsxCli() {
+  const candidates = [
+    // common tsx layouts across versions
+    "tsx/dist/cli.mjs",
+    "tsx/dist/cli.js",
+    "tsx/dist/cli.cjs",
+    "tsx/cli",
+  ];
+
+  for (const c of candidates) {
+    try {
+      const p = require.resolve(c);
+      if (fs.existsSync(p)) return p;
+    } catch {}
+  }
+  return null;
+}
+
+const tsxCli = resolveTsxCli();
+if (!tsxCli) {
+  console.error("[veritascale] tsx CLI not found. Make sure tsx is in dependencies and installed.");
+  process.exit(1);
+}
+
+const script = path.resolve(__dirname, "../packages/decision/src/cli/veritascale.ts");
+const args = [tsxCli, script, ...process.argv.slice(2)];
+
+const r = spawnSync(process.execPath, args, { stdio: "inherit" });
+process.exit(r.status ?? 1);
+
