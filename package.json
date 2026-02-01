@@ -60,7 +60,8 @@
     "decision:dia:smoke": "DEBUG_LIABILITY=1 npm run decision:dia:sqlite",
     "vs:keygen": "node -e \"const fs=require('fs');const crypto=require('crypto');const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');fs.mkdirSync('.veritascale',{recursive:true});fs.writeFileSync('.veritascale/priv.pem',privateKey.export({format:'pem',type:'pkcs8'}));fs.writeFileSync('.veritascale/pub.pem',publicKey.export({format:'pem',type:'spki'}));console.log('wrote .veritascale/{priv,pub}.pem');\"",
     "vs:seal": "veritascale seal",
-    "vs:verify": "veritascale verify"
+    "vs:verify": "veritascale verify",
+    "vs:demo": "node -e \"const fs=require('fs'); fs.writeFileSync('demo.json', JSON.stringify({decision_id:'demo-1',meta:{},signatures:[]},null,2)+'\\n');\" && veritascale seal demo.json --key .veritascale/priv.pem --embed-pub && veritascale verify demo.json --strict --verify-sigs && node -e \"console.log('OK demo.json');\""
   },
   "author": "",
   "license": "ISC",
