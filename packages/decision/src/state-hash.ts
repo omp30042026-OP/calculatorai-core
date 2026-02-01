@@ -45,6 +45,35 @@ export function stripNonStateFieldsForHash(decision: any) {
     // ignore
   }
 
+
+  // ---- Hash hygiene: meta "patch/helper" fields must NOT affect hashes ----
+  try {
+    const m: any = d?.meta ?? null;
+    if (m && typeof m === "object") {
+      // 1) Generic rule: any meta keys that are clearly "patch/helper" should not hash
+      for (const k of Object.keys(m)) {
+        if (
+          k.endsWith("_patch") ||
+          k.endsWith("_helper") ||
+          k.startsWith("patch_") ||
+          k.startsWith("helper_")
+        ) {
+          delete m[k];
+        }
+      }
+
+      // 2) Known transient compat keys (keep these explicit)
+      delete m.ai_generated;
+      delete m.system_generated;
+      delete m.ai_model;
+      delete m.system_id;
+      delete m.generated_at;
+      delete m.attribution_note;
+    }
+  } catch {
+    // ignore
+  }
+
   return d;
 }
 
