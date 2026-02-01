@@ -57,7 +57,10 @@
     "decision:fork-receipt:sqlite": "tsx examples/run-decision-fork-receipt-sqlite.ts",
     "decision:fork-receipt-tamper:sqlite": "tsx examples/run-decision-fork-receipt-tamper-sqlite.ts",
     "decision:dia:sqlite": "tsx examples/run-decision-dia-sqlite.ts",
-    "decision:dia:smoke": "DEBUG_LIABILITY=1 npm run decision:dia:sqlite"
+    "decision:dia:smoke": "DEBUG_LIABILITY=1 npm run decision:dia:sqlite",
+    "vs:keygen": "node -e \"const fs=require('fs');const crypto=require('crypto');const {publicKey,privateKey}=crypto.generateKeyPairSync('ed25519');fs.mkdirSync('.veritascale',{recursive:true});fs.writeFileSync('.veritascale/priv.pem',privateKey.export({format:'pem',type:'pkcs8'}));fs.writeFileSync('.veritascale/pub.pem',publicKey.export({format:'pem',type:'spki'}));console.log('wrote .veritascale/{priv,pub}.pem');\"",
+    "vs:seal": "veritascale seal",
+    "vs:verify": "veritascale verify"
   },
   "author": "",
   "license": "ISC",
