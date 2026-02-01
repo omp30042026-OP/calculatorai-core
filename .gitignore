@@ -49,3 +49,5 @@ decision_patch.json
 decision_nopatch.json
 decision*.json
 
+.veritascale/
+*.pem
