@@ -124,7 +124,13 @@ Examples:
 
 function readJsonFile(filePath: string): unknown {
   const abs = path.resolve(process.cwd(), filePath);
-  const raw = fs.readFileSync(abs, "utf8");
+  let raw: string;
+    try {
+    raw = fs.readFileSync(abs, "utf8");
+    } catch {
+    console.error(`[veritascale] file not found: ${filePath}`);
+    process.exit(1);
+    }
   try {
     return JSON.parse(raw);
   } catch {
