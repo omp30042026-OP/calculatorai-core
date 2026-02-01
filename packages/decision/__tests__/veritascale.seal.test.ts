@@ -140,4 +140,42 @@ describe("veritascale seal", () => {
     // signatures should still be 1 (idempotent / replace)
     expect(readJson(f).signatures?.length ?? 0).toBe(1);
   });
+
+  it("verifies with --pubkey when signature has no embedded public_key_pem", () => {
+  const dir = tmpdir();
+  const f = path.join(dir, "decision.json");
+
+  // write a tiny decision
+  writeJson(f, { decision_id: "d1", meta: {} });
+
+  // generate ed25519 keys (no external deps)
+  const crypto = require("node:crypto");
+  const fs = require("node:fs");
+
+  const { publicKey, privateKey } = crypto.generateKeyPairSync("ed25519");
+  fs.writeFileSync(path.join(dir, "priv.pem"), privateKey.export({ format: "pem", type: "pkcs8" }));
+  fs.writeFileSync(path.join(dir, "pub.pem"), publicKey.export({ format: "pem", type: "spki" }));
+
+  // seal WITHOUT embedding pubkey
+  const r1 = run("veritascale", ["seal", "decision.json", "--key", "priv.pem"], dir);
+  expect(r1.code).toBe(0);
+
+  // verify should FAIL without pubkey override
+  const rFail = run("veritascale", ["verify", "decision.json", "--strict", "--verify-sigs"], dir);
+  expect(rFail.code).toBe(1);
+
+  // verify should PASS with --pubkey override
+  const rOk = run(
+    "veritascale",
+    ["verify", "decision.json", "--strict", "--verify-sigs", "--pubkey", "pub.pem"],
+    dir
+  );
+  expect(rOk.code).toBe(0);
+
+  // signatures should still be 1
+  expect(readJson(f).signatures?.length ?? 0).toBe(1);
+});
+
+
+
 });
