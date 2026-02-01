@@ -51,3 +51,5 @@ decision*.json
 
 .veritascale/
 *.pem
+
+!examples/decision.min.json
