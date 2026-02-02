@@ -62,8 +62,8 @@
     "vs:seal": "veritascale seal",
     "vs:verify": "veritascale verify",
     "vs:demo": "node -e \"const fs=require('fs'); fs.writeFileSync('demo.json', JSON.stringify({decision_id:'demo-1',meta:{},signatures:[]},null,2)+'\\n');\" && veritascale seal demo.json --key .veritascale/priv.pem --embed-pub && veritascale verify demo.json --strict --verify-sigs && node -e \"console.log('OK demo.json');\"",
-    "vs:demo:embed": "node -e \"const fs=require('fs'); fs.writeFileSync('demo.json', JSON.stringify({decision_id:'demo-1',meta:{},signatures:[]},null,2)+'\\n');\" && veritascale seal demo.json --key .veritascale/priv.pem --embed-pub && veritascale verify demo.json --strict --verify-sigs && node -e \"console.log('OK demo.json (embedded pubkey)');\"",
-    "vs:demo:prod": "node -e \"const fs=require('fs'); fs.writeFileSync('demo.json', JSON.stringify({decision_id:'demo-1',meta:{},signatures:[]},null,2)+'\\n');\" && veritascale seal demo.json --key .veritascale/priv.pem && veritascale verify demo.json --strict --verify-sigs --pubkey .veritascale/pub.pem && node -e \"console.log('OK demo.json (pubkey override)');\""
+    "vs:demo:embed": "node -e \"const fs=require('fs'); const ex=fs.readFileSync('examples/decision.min.json','utf8'); fs.writeFileSync('demo.json', ex);\" && veritascale seal demo.json --key .veritascale/priv.pem --embed-pub && veritascale verify demo.json --strict --verify-sigs && node -e \"console.log('OK demo.json (embedded pubkey)');\" && rm -f demo.json",
+    "vs:demo:prod": "node -e \"const fs=require('fs'); const ex=fs.readFileSync('examples/decision.min.json','utf8'); fs.writeFileSync('demo.json', ex);\" && veritascale seal demo.json --key .veritascale/priv.pem && veritascale verify demo.json --strict --verify-sigs --pubkey .veritascale/pub.pem && node -e \"console.log('OK demo.json (pubkey override)');\" && rm -f demo.json"
   },
   "author": "",
   "license": "ISC",
