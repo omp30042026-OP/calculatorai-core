@@ -677,13 +677,25 @@ function cmdDiaExport(dbPath: string, decisionId: string, outFile: string | null
       process.exit(1);
     }
 
-    const decision = loadDecisionFromDia(db, decisionTable, decisionId);
+    // Read raw JSON as stored in DIA (do NOT rehydrate/normalize)
+    // We use the known schema in your sqlite: decision_id + decision_json
+    const row = db
+      .prepare(`SELECT decision_json FROM ${decisionTable} WHERE decision_id = ? LIMIT 1`)
+      .get(decisionId) as any;
 
-    if (outFile) {
-      writeFilePretty(outFile, decision);
-    } else {
-      writeJsonPretty(decision);
+    if (!row || row.decision_json == null) {
+      console.error(`[veritascale] Decision not found: ${decisionId}`);
+      process.exit(1);
     }
+
+    const raw =
+      typeof row.decision_json === "string"
+        ? row.decision_json
+        : Buffer.from(row.decision_json).toString("utf8");
+
+    const outPath = outFile ?? `${decisionId}.json`;
+    fs.writeFileSync(outPath, raw.replace(/\s*$/, "\n"), "utf8");
+    console.log(`[veritascale] exported: ${outPath}`);
   } finally {
     db.close();
   }
