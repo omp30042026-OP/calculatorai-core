@@ -194,4 +194,28 @@ it("sign --replace keeps signatures at 1", () => {
 });
 
 
+
+it("fails verify when --pubkey is wrong", () => {
+  const dir = tmpdir();
+  const f = path.join(dir, "decision.json");
+  writeJson(f, { decision_id: "wrong-key-test", meta: {} });
+
+  // keypair A (used to sign)
+  const a = crypto.generateKeyPairSync("ed25519");
+  fs.writeFileSync(path.join(dir, "priv.pem"), a.privateKey.export({ format: "pem", type: "pkcs8" }).toString(), "utf8");
+
+  // keypair B (wrong pubkey for verify override)
+  const b = crypto.generateKeyPairSync("ed25519");
+  fs.writeFileSync(path.join(dir, "wrong_pub.pem"), b.publicKey.export({ format: "pem", type: "spki" }).toString(), "utf8");
+
+  // seal WITHOUT embedding pubkey
+  expect(run("veritascale", ["seal", "decision.json", "--key", "priv.pem"], dir).code).toBe(0);
+
+  // verify should fail with wrong pubkey
+  const rWrong = run("veritascale", ["verify", "decision.json", "--strict", "--verify-sigs", "--pubkey", "wrong_pub.pem"], dir);
+  expect(rWrong.code).toBe(1);
+});
+
+
+
 });
