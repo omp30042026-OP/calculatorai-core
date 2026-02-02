@@ -53,3 +53,5 @@ decision*.json
 *.pem
 
 !examples/decision.min.json
+
+demo.json
